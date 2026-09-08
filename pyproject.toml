@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cfb-ranking-model"
+version = "0.1.0"
+description = "Live AP poll forecast, independent CFB rankings, and game margin predictions"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "joblib>=1.4,<2",
+  "lightgbm>=4.3,<5",
+  "numpy>=1.26,<2.4",
+  "pandas>=2.2,<3",
+  "python-dotenv>=1.0,<2",
+  "requests>=2.32,<3",
+  "scikit-learn>=1.5,<1.9",
+  "streamlit>=1.39,<2",
+  "xgboost>=2.1,<4",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9",
+  "ruff>=0.8,<1",
+]
+
+[project.scripts]
+cfb-rankings = "cfb_rankings.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

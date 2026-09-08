@@ -1,1 +1,190 @@
-# cfb-ranking
+# College Football Ranking Lab
+
+A live, CSV-backed system that produces:
+
+1. The current official AP Top 25.
+2. A machine-learning forecast of the next AP Top 25.
+3. An independent XGBoost ranking of FBS teams.
+4. Predicted margins and scores for upcoming games, compared with current consensus spreads.
+
+The sportsbook spread is **never an input** to the independent model. It is joined only after
+prediction so the model-versus-market comparison remains honest.
+
+## How the models work
+
+### AP poll forecast
+
+The training unit is one team in one historical AP poll week. Every row contains only
+information available before that poll. The pipeline performs rolling-season validation of:
+
+- XGBoost LambdaMART (`rank:ndcg`)
+- LightGBM LambdaRank
+- XGBoost AP-points regression
+- Histogram gradient-boosted AP-points regression
+- The prior poll as a persistence baseline
+
+The champion is selected from out-of-time evidence using NDCG@25, top-25 membership F1,
+rank error, and rank correlation. Results are written to `models/ap_model_evidence.csv`; the
+dashboard exposes them rather than silently hard-coding a favored algorithm.
+
+### Independent ranking and game forecast
+
+The independent model is XGBoost regression trained to predict the home team's final scoring
+margin from pregame information. Candidate XGBoost configurations are selected using complete
+future seasons as validation sets.
+
+Features include sequential Elo, record, opponent strength, scoring performance, ranked and
+quality wins, bad losses, road wins, recent form, yards, turnovers, offensive and defensive
+PPA, success rate, game location, and season progress. Optional CFBD advanced fields degrade
+cleanly when a season or API plan does not supply them.
+
+To rank teams, the trained model predicts every FBS-versus-FBS matchup on a neutral field. A
+team's independent rating is its average predicted margin across those opponents. This makes
+the ranking a direct model output, not a manually weighted polynomial score.
+
+## Leakage policy
+
+The project deliberately prevents these common backtesting errors:
+
+- A game uses team state from **before kickoff**, never end-of-season averages.
+- A poll forecast uses games through the preceding football week.
+- Ranked wins use the poll available when the game was played.
+- The betting spread is excluded from independent-model features.
+- Model selection validates on later, completely unseen seasons.
+- Betting lines are stored with retrieval timestamps rather than overwritten.
+
+## Locked-down Windows setup (recommended)
+
+The Windows portable bundle includes all Python 3.14 dependency wheels. It does not require
+administrator rights, a compiler, editable installation, or internet access. From PowerShell:
+
+```powershell
+.\setup-offline.ps1
+.\cfb.ps1 bootstrap --start-year 2014
+.\cfb.ps1 audit
+.\cfb.ps1 build-features
+.\cfb.ps1 train
+.\cfb.ps1 predict
+.\cfb.ps1 dashboard
+```
+
+Dependencies are placed under `%LOCALAPPDATA%\CFBRankingRuntime\py314`, outside OneDrive and
+outside the system Python installation. You do not activate a virtual environment.
+
+## Standard Python setup
+
+From PowerShell in this folder:
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -e ".[dev]"
+Copy-Item .env.example .env
+notepad .env
+```
+
+Put the CollegeFootballData key in `.env`:
+
+```dotenv
+CFBD_API_KEY=your_real_key_here
+CFB_CURRENT_SEASON=2026
+CFB_TIMEZONE=America/Chicago
+```
+
+The `.env` file is ignored by Git and must not be emailed or committed.
+
+## First historical build
+
+```powershell
+cfb-rankings bootstrap --start-year 2014
+cfb-rankings audit
+cfb-rankings build-features
+cfb-rankings train
+cfb-rankings predict
+cfb-rankings dashboard
+```
+
+The historical bootstrap may take several minutes. Optional advanced-stat or line endpoints
+are allowed to fail cleanly if the API key's plan does not include them; the core games,
+rankings, and team data are required.
+
+## Weekly/live refresh
+
+After the initial model training:
+
+```powershell
+.\scripts\update_current.ps1
+```
+
+This refreshes the current season, audits the CSVs, rebuilds pregame features, and regenerates
+rankings and upcoming-game predictions. It does not retrain on every refresh. To deliberately
+reselect and retrain both models:
+
+```powershell
+.\scripts\retrain.ps1
+```
+
+Run the refresh after the final relevant game and before the AP poll is released to create a
+true next-poll prediction. Running it after release creates a nowcast that can be compared with
+the newly observed poll.
+
+## Outputs
+
+All tables are ordinary CSV files:
+
+```text
+data/
+├── raw/
+│   ├── games.csv
+│   ├── rankings.csv
+│   ├── teams.csv
+│   ├── team_game_stats.csv
+│   ├── advanced_game_stats.csv
+│   └── betting_lines.csv
+├── processed/
+│   ├── data_audit.csv
+│   ├── game_training_data.csv
+│   ├── team_week_features.csv
+│   └── ap_training_data.csv
+└── predictions/
+    ├── actual_ap_poll.csv
+    ├── predicted_ap_poll.csv
+    ├── independent_rankings.csv
+    ├── upcoming_game_predictions.csv
+    ├── current_rankings.csv
+    ├── ap_prediction_history.csv
+    └── game_prediction_history.csv
+```
+
+The two history files are append-only prediction snapshots. Each AP snapshot is marked
+`pre_release_forecast` or `nowcast_after_release`, preventing a post-release refresh from being
+mistaken for a genuine forecast.
+
+Trained model binaries and validation evidence are placed in `models/`.
+
+## Spread conventions
+
+The model stores `model_home_margin` as:
+
+```text
+predicted home score - predicted away score
+```
+
+Positive means the home team is favored. CFBD's numeric sportsbook spread is a home-team
+handicap, so a spread of `-3.5` becomes a market-implied home margin of `+3.5`.
+
+```text
+model_edge_home = model_home_margin - market_home_margin
+```
+
+Positive edge favors the home team against the line; negative edge favors the away team. Line
+timestamps and contributing providers appear beside every comparison. These estimates are
+uncertain and are intended for model evaluation, not as guaranteed betting outcomes.
+
+## Tests
+
+```powershell
+pytest
+ruff check src tests
+```

@@ -1,0 +1,16 @@
+.env
+.venv/
+.runtime/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+*.egg-info/
+data/raw/*.csv
+data/processed/*.csv
+data/predictions/*.csv
+models/*.json
+models/*.joblib
+models/*.csv
+wheelhouse/
+!data/**/.gitkeep
