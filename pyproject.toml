@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cfb-ranking-model"
-version = "0.1.0"
+version = "0.4.0"
 description = "Live AP poll forecast, independent CFB rankings, and game margin predictions"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,6 +17,8 @@ dependencies = [
   "requests>=2.32,<3",
   "scikit-learn>=1.5,<1.9",
   "streamlit>=1.39,<2",
+  "starlette>=1.0,<2",
+  "uvicorn>=0.40,<1",
   "xgboost>=2.1,<4",
 ]
 

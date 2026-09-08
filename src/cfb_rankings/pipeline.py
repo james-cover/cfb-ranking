@@ -19,6 +19,7 @@ from .game_model import (
     predict_upcoming_games,
     select_and_train_game_model,
 )
+from .logos import BRANDING_COLUMNS, build_team_branding
 from .storage import atomic_write_csv, read_csv, upsert_csv
 
 RAW_FILES = {
@@ -122,6 +123,9 @@ def generate_predictions(settings: Settings) -> dict[str, int]:
         raw["lines"],
         settings.season,
     )
+    branding = build_team_branding(
+        raw["teams"], settings.season, settings.team_logos_dir
+    )
     actual = _current_actual_ap(raw["rankings"], settings.season)
     generated_at = datetime.now(UTC).isoformat()
     latest_actual_week = (
@@ -136,6 +140,20 @@ def generate_predictions(settings: Settings) -> dict[str, int]:
     )
     predicted_ap["generated_at"] = generated_at
     predicted_ap["prediction_mode"] = prediction_mode
+    brand_fields = [column for column in BRANDING_COLUMNS if column != "team"]
+    if not branding.empty:
+        actual = actual.merge(branding, on="team", how="left")
+        predicted_ap = predicted_ap.merge(branding, on="team", how="left")
+        independent = independent.merge(branding, on="team", how="left")
+        if not upcoming.empty:
+            for side in ("home", "away"):
+                side_branding = branding.rename(
+                    columns={
+                        "team": f"{side}_team",
+                        **{field: f"{side}_{field}" for field in brand_fields},
+                    }
+                )
+                upcoming = upcoming.merge(side_branding, on=f"{side}_team", how="left")
     combined = independent.merge(
         actual[["team", "actual_ap_rank", "actual_ap_points"]], on="team", how="left"
     ).merge(
@@ -175,6 +193,9 @@ def generate_predictions(settings: Settings) -> dict[str, int]:
         "predicted_ap_teams": len(predicted_ap),
         "independent_teams": len(independent),
         "upcoming_games": len(upcoming),
+        "team_logos_cached": int(
+            branding["logo_path"].fillna("").ne("").sum()
+        ) if not branding.empty else 0,
     }
 
 

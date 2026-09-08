@@ -35,6 +35,14 @@ class Settings:
         return self.data_dir / "predictions"
 
     @property
+    def team_logos_dir(self) -> Path:
+        return self.project_root / "frontend" / "team_logos"
+
+    @property
+    def frontend_dir(self) -> Path:
+        return self.project_root / "frontend"
+
+    @property
     def models_dir(self) -> Path:
         return self.project_root / "models"
 
@@ -50,6 +58,7 @@ class Settings:
             self.raw_dir,
             self.processed_dir,
             self.predictions_dir,
+            self.team_logos_dir,
             self.models_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
@@ -67,4 +76,3 @@ def load_settings(project_root: Path | None = None) -> Settings:
     )
     settings.ensure_directories()
     return settings
-

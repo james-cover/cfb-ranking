@@ -6,9 +6,32 @@ A live, CSV-backed system that produces:
 2. A machine-learning forecast of the next AP Top 25.
 3. An independent XGBoost ranking of FBS teams.
 4. Predicted margins and scores for upcoming games, compared with current consensus spreads.
+5. Locally cached team logos and official team colors for the included HTML frontend.
 
 The sportsbook spread is **never an input** to the independent model. It is joined only after
 prediction so the model-versus-market comparison remains honest.
+
+## Production frontend/API connection
+
+The backend serves the HTML and JSON API from the same process. Start it with:
+
+```powershell
+cfb-rankings serve
+```
+
+Then open `http://127.0.0.1:8000`. The frontend automatically loads the latest backend output;
+CSV importing remains available only as a fallback. Available endpoints are:
+
+- `GET /api/health`
+- `GET /api/rankings`
+- `GET /api/games`
+- `GET /api/teams/{team}`
+- `GET /team_logos/{filename}`
+
+CSV responses are cached in memory until the source file's modification time or size changes.
+Because prediction files are written atomically, a live refresh cannot expose a partial CSV.
+For deployment, run this service behind the site's HTTPS reverse proxy rather than exposing the
+Uvicorn port directly.
 
 ## How the models work
 
@@ -155,6 +178,10 @@ data/
     ├── current_rankings.csv
     ├── ap_prediction_history.csv
     └── game_prediction_history.csv
+frontend/
+├── index.html
+└── team_logos/
+    └── <team_id>.png
 ```
 
 The two history files are append-only prediction snapshots. Each AP snapshot is marked
@@ -162,6 +189,18 @@ The two history files are append-only prediction snapshots. Each AP snapshot is 
 mistaken for a genuine forecast.
 
 Trained model binaries and validation evidence are placed in `models/`.
+
+## Team logos and colors
+
+The CFBD teams response already supplies each team's logo URLs, primary color, and alternate
+color. During `predict`, the backend downloads the current-season logos once into
+`frontend/team_logos/` and reuses the cached files on later refreshes. Logo download failures
+are logged but never block rankings or game predictions.
+
+The ranking CSVs include `team_id`, `logo_url`, `logo_path`, `team_color`, and `alt_color`.
+Upcoming-game predictions include the same fields with `home_` and `away_` prefixes. Open
+`frontend/index.html` directly; it uses the local image first, the remote URL as a fallback,
+and team initials if neither image is available.
 
 ## Spread conventions
 

@@ -42,6 +42,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_all = commands.add_parser("run-all", help="Refresh current data through predictions")
     run_all.add_argument("--season", type=int, default=None)
     commands.add_parser("dashboard", help="Launch the Streamlit dashboard")
+    serve = commands.add_parser("serve", help="Serve the HTML frontend and JSON API")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8000)
     return parser
 
 
@@ -89,9 +92,19 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit("Streamlit is not installed. Run: pip install -e .")
         dashboard = Path(__file__).with_name("dashboard.py")
         return subprocess.call([executable, "run", str(dashboard)])
+    elif args.command == "serve":
+        import uvicorn
+
+        from .server import create_app
+
+        uvicorn.run(
+            create_app(settings),
+            host=args.host,
+            port=args.port,
+            log_level="info",
+        )
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
-
