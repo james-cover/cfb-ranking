@@ -27,6 +27,12 @@ MODEL_FEATURE_BASELINES = {
     "offense_success_rate": 0.4,
     "defense_success_rate": 0.4,
     "recent_margin_3": 0.0,
+    # Quality-adjusted stats share the same baselines as their raw counterparts.
+    # The opponent weighting already discounts weak-schedule results naturally,
+    # so the prior here is just a safety net for zero-game edge cases.
+    "quality_adj_margin": 0.0,
+    "quality_adj_ppg": 27.0,
+    "quality_adj_ppg_allowed": 27.0,
 }
 
 
@@ -82,6 +88,13 @@ class TeamState:
     advanced_games: int = 0
     recent_margins: list[float] = field(default_factory=list)
     results: list[tuple[str, int]] = field(default_factory=list)
+    # Opponent-quality-weighted accumulators.  Each game's contribution is
+    # scaled by (opponent_elo / 1500) so that a 49-point blowout of a 1327-Elo
+    # cupcake inflates these stats far less than 49 points against a 1600-Elo team.
+    quality_margin_sum: float = 0.0
+    quality_score_sum: float = 0.0
+    quality_allowed_sum: float = 0.0
+    quality_weight_sum: float = 0.0
 
     def snapshot(self) -> dict[str, float | int | str]:
         games = max(self.games, 1)
@@ -123,6 +136,21 @@ class TeamState:
             "recent_margin_3": (
                 float(np.mean(self.recent_margins[-3:])) if self.recent_margins else 0.0
             ),
+            # Quality-adjusted stats: weighted by opponent Elo / 1500.
+            # After 1 game vs a 1327-Elo team, these are heavily discounted vs
+            # raw stats, giving the model an explicit signal about schedule strength.
+            "quality_adj_margin": (
+                self.quality_margin_sum / self.quality_weight_sum
+                if self.quality_weight_sum > 0 else 0.0
+            ),
+            "quality_adj_ppg": (
+                self.quality_score_sum / self.quality_weight_sum
+                if self.quality_weight_sum > 0 else 0.0
+            ),
+            "quality_adj_ppg_allowed": (
+                self.quality_allowed_sum / self.quality_weight_sum
+                if self.quality_weight_sum > 0 else 0.0
+            ),
         }
 
 
@@ -148,6 +176,9 @@ TEAM_NUMERIC_FEATURES = [
     "offense_success_rate",
     "defense_success_rate",
     "recent_margin_3",
+    "quality_adj_margin",
+    "quality_adj_ppg",
+    "quality_adj_ppg_allowed",
 ]
 
 MATCHUP_FEATURES = [
@@ -172,6 +203,9 @@ MATCHUP_FEATURES = [
     "offense_success_rate_diff",
     "defense_success_rate_diff",
     "recent_margin_3_diff",
+    "quality_adj_margin_diff",
+    "quality_adj_ppg_diff",
+    "quality_adj_ppg_allowed_diff",
     "neutral_site",
     "home_field",
     "season_progress",
@@ -443,6 +477,20 @@ def build_sequential_features(
                 away.opponent_elo_sum += home_elo_before
                 home.recent_margins.append(home_margin)
                 away.recent_margins.append(-home_margin)
+
+                # Quality-weighted accumulators: scale each game's contribution
+                # by the opponent's Elo relative to the 1500 baseline so that
+                # blowouts against weak opponents don't inflate stats as much.
+                home_opp_quality = away_elo_before / 1500.0
+                away_opp_quality = home_elo_before / 1500.0
+                home.quality_margin_sum += home_margin * home_opp_quality
+                home.quality_score_sum += float(game.home_points) * home_opp_quality
+                home.quality_allowed_sum += float(game.away_points) * home_opp_quality
+                home.quality_weight_sum += home_opp_quality
+                away.quality_margin_sum += (-home_margin) * away_opp_quality
+                away.quality_score_sum += float(game.away_points) * away_opp_quality
+                away.quality_allowed_sum += float(game.home_points) * away_opp_quality
+                away.quality_weight_sum += away_opp_quality
 
                 if home_margin > 0:
                     home.wins += 1
