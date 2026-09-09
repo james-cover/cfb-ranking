@@ -33,6 +33,21 @@ MODEL_FEATURE_BASELINES = {
     "quality_adj_margin": 0.0,
     "quality_adj_ppg": 27.0,
     "quality_adj_ppg_allowed": 27.0,
+    # Box score stat baselines (FBS averages).
+    "rushing_ypg": 160.0,
+    "rushing_ypg_allowed": 160.0,
+    "passing_ypg": 215.0,
+    "passing_ypg_allowed": 215.0,
+    "yards_per_rush": 4.2,
+    "yards_per_rush_allowed": 4.2,
+    "yards_per_pass": 7.0,
+    "yards_per_pass_allowed": 7.0,
+    "third_down_pct": 0.38,
+    "third_down_pct_allowed": 0.38,
+    "first_downs_pg": 20.0,
+    "first_downs_pg_allowed": 20.0,
+    "penalty_yards_pg": 50.0,
+    "possession_time_pg": 30.0,
 }
 
 
@@ -49,6 +64,53 @@ def _safe_float(value: Any) -> float | None:
         return float(text)
     except ValueError:
         return None
+
+
+def _parse_efficiency(value: Any) -> float | None:
+    """Parse 'made-attempts' strings like '2-17' into a rate (0.118)."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if "-" not in text:
+        return _safe_float(text)
+    parts = text.split("-")
+    if len(parts) != 2:
+        return None
+    try:
+        made, attempts = float(parts[0]), float(parts[1])
+        return made / attempts if attempts > 0 else 0.0
+    except ValueError:
+        return None
+
+
+def _parse_penalty_yards(value: Any) -> tuple[float | None, float | None]:
+    """Parse 'count-yards' strings like '3-23' into (count, yards)."""
+    if value is None:
+        return None, None
+    text = str(value).strip()
+    if "-" not in text:
+        return None, _safe_float(text)
+    parts = text.split("-")
+    if len(parts) != 2:
+        return None, None
+    try:
+        return float(parts[0]), float(parts[1])
+    except ValueError:
+        return None, None
+
+
+def _parse_possession_time(value: Any) -> float | None:
+    """Parse 'MM:SS' strings like '32:54' into minutes (32.9)."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if ":" in text:
+        parts = text.split(":")
+        try:
+            return float(parts[0]) + float(parts[1]) / 60.0
+        except (ValueError, IndexError):
+            return None
+    return _safe_float(text)
 
 
 def _find_stat(stats: dict[str, Any], aliases: tuple[str, ...]) -> float | None:
@@ -81,6 +143,23 @@ class TeamState:
     turnovers_forced_sum: float = 0.0
     turnovers_lost_sum: float = 0.0
     stat_games: int = 0
+    # Detailed box score accumulators.
+    rushing_yards_for_sum: float = 0.0
+    rushing_yards_against_sum: float = 0.0
+    passing_yards_for_sum: float = 0.0
+    passing_yards_against_sum: float = 0.0
+    yards_per_rush_sum: float = 0.0
+    yards_per_rush_against_sum: float = 0.0
+    yards_per_pass_sum: float = 0.0
+    yards_per_pass_against_sum: float = 0.0
+    third_down_pct_sum: float = 0.0
+    third_down_pct_against_sum: float = 0.0
+    first_downs_for_sum: float = 0.0
+    first_downs_against_sum: float = 0.0
+    penalty_yards_for_sum: float = 0.0
+    penalty_yards_against_sum: float = 0.0
+    possession_time_sum: float = 0.0
+    box_games: int = 0  # games with detailed box score data
     offense_ppa_sum: float = 0.0
     defense_ppa_sum: float = 0.0
     offense_success_rate_sum: float = 0.0
@@ -101,6 +180,7 @@ class TeamState:
         games = max(self.games, 1)
         stat_games = max(self.stat_games, 1)
         advanced_games = max(self.advanced_games, 1)
+        box_games = max(self.box_games, 1)
         return {
             "team": self.team,
             "elo": self.elo,
@@ -127,6 +207,21 @@ class TeamState:
                 if self.stat_games
                 else 0.0
             ),
+            # Detailed box score stats.
+            "rushing_ypg": self.rushing_yards_for_sum / box_games if self.box_games else 0.0,
+            "rushing_ypg_allowed": self.rushing_yards_against_sum / box_games if self.box_games else 0.0,
+            "passing_ypg": self.passing_yards_for_sum / box_games if self.box_games else 0.0,
+            "passing_ypg_allowed": self.passing_yards_against_sum / box_games if self.box_games else 0.0,
+            "yards_per_rush": self.yards_per_rush_sum / box_games if self.box_games else 0.0,
+            "yards_per_rush_allowed": self.yards_per_rush_against_sum / box_games if self.box_games else 0.0,
+            "yards_per_pass": self.yards_per_pass_sum / box_games if self.box_games else 0.0,
+            "yards_per_pass_allowed": self.yards_per_pass_against_sum / box_games if self.box_games else 0.0,
+            "third_down_pct": self.third_down_pct_sum / box_games if self.box_games else 0.0,
+            "third_down_pct_allowed": self.third_down_pct_against_sum / box_games if self.box_games else 0.0,
+            "first_downs_pg": self.first_downs_for_sum / box_games if self.box_games else 0.0,
+            "first_downs_pg_allowed": self.first_downs_against_sum / box_games if self.box_games else 0.0,
+            "penalty_yards_pg": self.penalty_yards_for_sum / box_games if self.box_games else 0.0,
+            "possession_time_pg": self.possession_time_sum / box_games if self.box_games else 30.0,
             "offense_ppa": self.offense_ppa_sum / advanced_games if self.advanced_games else 0.0,
             "defense_ppa": self.defense_ppa_sum / advanced_games if self.advanced_games else 0.0,
             "offense_success_rate": (
@@ -182,6 +277,21 @@ TEAM_NUMERIC_FEATURES = [
     "quality_adj_margin",
     "quality_adj_ppg",
     "quality_adj_ppg_allowed",
+    # Detailed box score stats.
+    "rushing_ypg",
+    "rushing_ypg_allowed",
+    "passing_ypg",
+    "passing_ypg_allowed",
+    "yards_per_rush",
+    "yards_per_rush_allowed",
+    "yards_per_pass",
+    "yards_per_pass_allowed",
+    "third_down_pct",
+    "third_down_pct_allowed",
+    "first_downs_pg",
+    "first_downs_pg_allowed",
+    "penalty_yards_pg",
+    "possession_time_pg",
 ]
 
 MATCHUP_FEATURES = [
@@ -210,6 +320,21 @@ MATCHUP_FEATURES = [
     "quality_adj_margin_diff",
     "quality_adj_ppg_diff",
     "quality_adj_ppg_allowed_diff",
+    # Detailed box score diffs.
+    "rushing_ypg_diff",
+    "rushing_ypg_allowed_diff",
+    "passing_ypg_diff",
+    "passing_ypg_allowed_diff",
+    "yards_per_rush_diff",
+    "yards_per_rush_allowed_diff",
+    "yards_per_pass_diff",
+    "yards_per_pass_allowed_diff",
+    "third_down_pct_diff",
+    "third_down_pct_allowed_diff",
+    "first_downs_pg_diff",
+    "first_downs_pg_allowed_diff",
+    "penalty_yards_pg_diff",
+    "possession_time_pg_diff",
     "neutral_site",
     "home_field",
     "season_progress",
@@ -551,6 +676,63 @@ def build_sequential_features(
                         home.turnovers_forced_sum += away_turnovers
                         away.turnovers_lost_sum += away_turnovers
                         away.turnovers_forced_sum += home_turnovers
+
+                # Detailed box score stats.
+                h_rush = _find_stat(home_stats, ("rushingYards",))
+                a_rush = _find_stat(away_stats, ("rushingYards",))
+                h_pass = _find_stat(home_stats, ("netPassingYards",))
+                a_pass = _find_stat(away_stats, ("netPassingYards",))
+                h_ypr = _find_stat(home_stats, ("yardsPerRushAttempt",))
+                a_ypr = _find_stat(away_stats, ("yardsPerRushAttempt",))
+                h_ypp = _find_stat(home_stats, ("yardsPerPass",))
+                a_ypp = _find_stat(away_stats, ("yardsPerPass",))
+                h_3d = _parse_efficiency(_find_stat(home_stats, ("thirdDownEff",)) if "thirdDownEff" not in home_stats else home_stats.get("thirdDownEff"))
+                a_3d = _parse_efficiency(_find_stat(away_stats, ("thirdDownEff",)) if "thirdDownEff" not in away_stats else away_stats.get("thirdDownEff"))
+                h_fd = _find_stat(home_stats, ("firstDowns",))
+                a_fd = _find_stat(away_stats, ("firstDowns",))
+                _, h_pen_yds = _parse_penalty_yards(home_stats.get("totalPenaltiesYards"))
+                _, a_pen_yds = _parse_penalty_yards(away_stats.get("totalPenaltiesYards"))
+                h_poss = _parse_possession_time(home_stats.get("possessionTime"))
+
+                has_box = (h_rush is not None and a_rush is not None
+                           and h_pass is not None and a_pass is not None)
+                if has_box:
+                    home.box_games += 1
+                    away.box_games += 1
+                    home.rushing_yards_for_sum += h_rush
+                    home.rushing_yards_against_sum += a_rush
+                    away.rushing_yards_for_sum += a_rush
+                    away.rushing_yards_against_sum += h_rush
+                    home.passing_yards_for_sum += h_pass
+                    home.passing_yards_against_sum += a_pass
+                    away.passing_yards_for_sum += a_pass
+                    away.passing_yards_against_sum += h_pass
+                    if h_ypr is not None and a_ypr is not None:
+                        home.yards_per_rush_sum += h_ypr
+                        home.yards_per_rush_against_sum += a_ypr
+                        away.yards_per_rush_sum += a_ypr
+                        away.yards_per_rush_against_sum += h_ypr
+                    if h_ypp is not None and a_ypp is not None:
+                        home.yards_per_pass_sum += h_ypp
+                        home.yards_per_pass_against_sum += a_ypp
+                        away.yards_per_pass_sum += a_ypp
+                        away.yards_per_pass_against_sum += h_ypp
+                    if h_3d is not None and a_3d is not None:
+                        home.third_down_pct_sum += h_3d
+                        home.third_down_pct_against_sum += a_3d
+                        away.third_down_pct_sum += a_3d
+                        away.third_down_pct_against_sum += h_3d
+                    if h_fd is not None and a_fd is not None:
+                        home.first_downs_for_sum += h_fd
+                        home.first_downs_against_sum += a_fd
+                        away.first_downs_for_sum += a_fd
+                        away.first_downs_against_sum += h_fd
+                    if h_pen_yds is not None and a_pen_yds is not None:
+                        home.penalty_yards_for_sum += h_pen_yds
+                        away.penalty_yards_for_sum += a_pen_yds
+                    if h_poss is not None:
+                        home.possession_time_sum += h_poss
+                        away.possession_time_sum += 60.0 - h_poss
 
                 home_advanced = advanced_lookup.get((game.game_id, str(game.home_team)), {})
                 away_advanced = advanced_lookup.get((game.game_id, str(game.away_team)), {})
