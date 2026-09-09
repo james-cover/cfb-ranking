@@ -753,3 +753,156 @@ def build_season_schedule(
             future_predictions[prediction_columns], on="game_id", how="left"
         )
     return schedule.sort_values(["start_date", "game_id"], kind="stable").reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+#  Edge model — learns where the market systematically misprices games.
+#  Target: actual_home_margin - market_home_margin  (positive = home covered)
+#  Features: all MATCHUP_FEATURES + market_home_margin itself.
+# ---------------------------------------------------------------------------
+
+EDGE_FEATURES = MATCHUP_FEATURES + ["market_home_margin"]
+
+EDGE_PARAMETER_CANDIDATES = [
+    {
+        "max_depth": 3,
+        "min_child_weight": 10,
+        "learning_rate": 0.02,
+        "subsample": 0.75,
+        "colsample_bytree": 0.70,
+        "reg_lambda": 8.0,
+    },
+    {
+        "max_depth": 3,
+        "min_child_weight": 12,
+        "learning_rate": 0.015,
+        "subsample": 0.70,
+        "colsample_bytree": 0.65,
+        "reg_lambda": 10.0,
+    },
+]
+
+
+@dataclass
+class EdgeModelBundle:
+    model: XGBRegressor
+    imputer: SimpleImputer
+    features: list[str]
+    residual_std: float
+
+
+def train_edge_model(
+    game_features: pd.DataFrame,
+    models_dir: Path,
+    *,
+    validation_seasons: int = 4,
+    validation_cutoff_season: int | None = None,
+    random_state: int = 99,
+) -> tuple[EdgeModelBundle | None, dict[str, Any]]:
+    """Train an edge model that predicts actual_margin - market_spread."""
+    required = {"home_margin", "market_home_margin", "season"}
+    if game_features.empty or not required.issubset(game_features.columns):
+        return None, {"edge_model": "skipped — no market lines in training data"}
+
+    work = game_features.dropna(subset=["home_margin", "market_home_margin", "season"]).copy()
+    work["cover_residual"] = work["home_margin"] - work["market_home_margin"]
+    if len(work) < 200:
+        return None, {"edge_model": "skipped — fewer than 200 games with lines"}
+
+    selection_work = work
+    if validation_cutoff_season is not None:
+        selection_work = work[
+            pd.to_numeric(work["season"], errors="coerce").lt(validation_cutoff_season)
+        ]
+
+    seasons = sorted(selection_work["season"].astype(int).unique())
+    if len(seasons) < 3:
+        return None, {"edge_model": "skipped — fewer than 3 seasons with lines"}
+    folds = seasons[-min(validation_seasons, len(seasons) - 1):]
+
+    best_ats: dict[str, Any] = {}
+    best_params = EDGE_PARAMETER_CANDIDATES[0]
+    best_score = -1.0
+
+    for parameters in EDGE_PARAMETER_CANDIDATES:
+        fold_actuals: list[float] = []
+        fold_predicted: list[float] = []
+        fold_market: list[float] = []
+
+        for val_season in folds:
+            train = selection_work[selection_work["season"].astype(int) < val_season]
+            validate = selection_work[selection_work["season"].astype(int).eq(val_season)]
+            if train.empty or validate.empty:
+                continue
+
+            imputer = SimpleImputer(strategy="median")
+            x_train = imputer.fit_transform(train.reindex(columns=EDGE_FEATURES))
+            x_val = imputer.transform(validate.reindex(columns=EDGE_FEATURES))
+
+            model = XGBRegressor(
+                objective="reg:squarederror",
+                n_estimators=400,
+                n_jobs=-1,
+                random_state=random_state,
+                **parameters,
+            )
+            model.fit(x_train, train["cover_residual"].to_numpy(dtype=float), verbose=False)
+            predicted_edge = model.predict(x_val)
+
+            fold_actuals.extend(validate["home_margin"].to_numpy(dtype=float).tolist())
+            fold_predicted.extend(
+                (validate["market_home_margin"].to_numpy(dtype=float) + predicted_edge).tolist()
+            )
+            fold_market.extend(validate["market_home_margin"].to_numpy(dtype=float).tolist())
+
+        if not fold_actuals:
+            continue
+
+        ats = evaluate_ats(
+            np.array(fold_actuals), np.array(fold_predicted), np.array(fold_market)
+        )
+        # Score by 7pt ATS accuracy, fall back to 5pt.
+        score = ats.get("ats_accuracy_7pt", ats.get("ats_accuracy_5pt", 0.5))
+        if isinstance(score, float) and not np.isnan(score) and score > best_score:
+            best_score = score
+            best_params = parameters
+            best_ats = ats
+
+    # Final training on all data with best params.
+    imputer = SimpleImputer(strategy="median")
+    matrix = imputer.fit_transform(work.reindex(columns=EDGE_FEATURES))
+    final_model = XGBRegressor(
+        objective="reg:squarederror",
+        n_estimators=400,
+        n_jobs=-1,
+        random_state=random_state,
+        **best_params,
+    )
+    final_model.fit(matrix, work["cover_residual"].to_numpy(dtype=float), verbose=False)
+    fitted = final_model.predict(matrix)
+    residual_std = float(np.std(work["cover_residual"].to_numpy(dtype=float) - fitted, ddof=1))
+
+    bundle = EdgeModelBundle(
+        model=final_model,
+        imputer=imputer,
+        features=list(EDGE_FEATURES),
+        residual_std=residual_std,
+    )
+    models_dir.mkdir(parents=True, exist_ok=True)
+    joblib.dump(bundle, models_dir / "edge_xgboost.joblib")
+
+    output = {
+        "edge_model": "trained",
+        "edge_training_games": len(work),
+        "edge_validation_seasons": folds,
+        "edge_best_params": best_params,
+        **{f"edge_{k}": v for k, v in best_ats.items()},
+    }
+    return bundle, output
+
+
+def load_edge_model(models_dir: Path) -> EdgeModelBundle | None:
+    path = models_dir / "edge_xgboost.joblib"
+    if not path.exists():
+        return None
+    return joblib.load(path)

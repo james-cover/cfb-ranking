@@ -16,9 +16,12 @@ from .features import (
 from .game_model import (
     build_season_schedule,
     build_independent_rankings,
+    load_edge_model,
     load_game_model,
     predict_upcoming_games,
     select_and_train_game_model,
+    train_edge_model,
+    EDGE_FEATURES,
 )
 from .logos import BRANDING_COLUMNS, build_team_branding
 from .storage import atomic_write_csv, read_csv, upsert_csv
@@ -82,6 +85,12 @@ def train_models(settings: Settings) -> dict[str, object]:
         settings.models_dir,
         validation_cutoff_season=settings.season,
     )
+    # Train the edge model (market-aware, predicts cover residual).
+    _edge_bundle, edge_output = train_edge_model(
+        game_training,
+        settings.models_dir,
+        validation_cutoff_season=settings.season,
+    )
     selected_row = game_evidence.iloc[0]
     ats_keys = [c for c in game_evidence.columns if c.startswith("ats_")]
     ats_output = {k: (float(selected_row[k]) if not pd.isna(selected_row[k]) else None) for k in ats_keys}
@@ -90,7 +99,8 @@ def train_models(settings: Settings) -> dict[str, object]:
         "ap_selection_score": float(ap_evidence.iloc[0]["selection_score"]),
         "game_validation_mae": float(selected_row["mae"]),
         "game_winner_accuracy": float(selected_row["winner_accuracy"]),
-        **ats_output,
+        "raw_model_ats": ats_output,
+        "edge_model": edge_output,
     }
 
 
@@ -157,6 +167,38 @@ def generate_predictions(settings: Settings) -> dict[str, int]:
         settings.season,
         next_slate_only=False,
     )
+    # Apply the edge model to override cover probabilities and spread EV
+    # for games that have market lines. The edge model predicts the cover
+    # residual (actual_margin - market_spread) using team stats + the spread
+    # itself, so its cover_probability captures market-aware edge, not just
+    # raw model disagreement.
+    edge_bundle = load_edge_model(settings.models_dir)
+    if edge_bundle is not None and not all_upcoming.empty:
+        has_line = all_upcoming["market_home_margin"].notna()
+        if has_line.any():
+            lined = all_upcoming.loc[has_line].copy()
+            edge_matrix = edge_bundle.imputer.transform(
+                lined.reindex(columns=edge_bundle.features)
+            )
+            predicted_edge = edge_bundle.model.predict(edge_matrix)
+            # Predicted edge > 0 means model expects home to cover.
+            scale = max(edge_bundle.residual_std, 1e-6)
+            import math as _math
+            cover_prob = np.array([
+                0.5 * (1.0 + _math.erf(e / (scale * _math.sqrt(2.0)))) for e in predicted_edge
+            ])
+            all_upcoming.loc[has_line, "cover_probability_home"] = cover_prob
+            all_upcoming.loc[has_line, "cover_probability_away"] = 1.0 - cover_prob
+            all_upcoming.loc[has_line, "model_edge_home"] = predicted_edge
+            from .game_model import _moneyline_expected_value
+            all_upcoming.loc[has_line, "home_spread_ev_100"] = _moneyline_expected_value(
+                all_upcoming.loc[has_line, "cover_probability_home"],
+                all_upcoming.loc[has_line, "home_spread_odds"],
+            )
+            all_upcoming.loc[has_line, "away_spread_ev_100"] = _moneyline_expected_value(
+                all_upcoming.loc[has_line, "cover_probability_away"],
+                all_upcoming.loc[has_line, "away_spread_odds"],
+            )
     # Attach broadcast outlet to upcoming games and season schedule.
     tv_lookup = _tv_outlet_lookup(raw.get("media", pd.DataFrame()))
     if not tv_lookup.empty and not all_upcoming.empty:
