@@ -16,6 +16,7 @@ from .features import (
 from .game_model import (
     build_season_schedule,
     build_independent_rankings,
+    _build_edge_features,
     load_edge_model,
     load_game_model,
     predict_upcoming_games,
@@ -176,7 +177,7 @@ def generate_predictions(settings: Settings) -> dict[str, int]:
     if edge_bundle is not None and not all_upcoming.empty:
         has_line = all_upcoming["market_home_margin"].notna()
         if has_line.any():
-            lined = all_upcoming.loc[has_line].copy()
+            lined = _build_edge_features(all_upcoming.loc[has_line].copy())
             edge_matrix = edge_bundle.imputer.transform(
                 lined.reindex(columns=edge_bundle.features)
             )

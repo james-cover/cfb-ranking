@@ -757,15 +757,68 @@ def build_season_schedule(
 
 # ---------------------------------------------------------------------------
 #  Edge model — learns where the market systematically misprices games.
-#  Target: actual_home_margin - market_home_margin  (positive = home covered)
-#  Features: all MATCHUP_FEATURES + market_home_margin itself.
+#  Uses SITUATIONAL features (spread size, week, home dog, Elo vs spread
+#  disagreement) alongside team stats. These capture known market biases
+#  that raw team quality stats can't — because Vegas already prices those in.
 # ---------------------------------------------------------------------------
 
-EDGE_FEATURES = MATCHUP_FEATURES + ["market_home_margin"]
+
+def _build_edge_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Engineer situational columns that expose known market inefficiencies."""
+    out = df.copy()
+    mhm = pd.to_numeric(out.get("market_home_margin"), errors="coerce").fillna(0)
+    # How big is the spread? Large spreads have more variance and are harder to set.
+    out["spread_magnitude"] = mhm.abs()
+    # Is the home team an underdog? Home dogs historically cover at ~52-53%.
+    out["home_is_underdog"] = (mhm < 0).astype(float)
+    # Is this a massive spread? 20+ point favorites often don't cover.
+    out["is_large_spread"] = (mhm.abs() >= 20).astype(float)
+    # Early season flag — weeks 1-3 have the weakest lines.
+    week = pd.to_numeric(out.get("week", out.get("season_progress", 0) * 15), errors="coerce").fillna(5)
+    out["early_season"] = (week <= 3).astype(float)
+    # Elo vs spread disagreement — when Elo says one thing and the market says
+    # another by a wide margin, one of them is wrong.
+    elo_margin = pd.to_numeric(out.get("elo_diff"), errors="coerce").fillna(0) * 0.04
+    out["elo_spread_disagreement"] = elo_margin - mhm
+    # How many games has each team played? Both 1-game teams = low confidence.
+    sg = pd.to_numeric(out.get("season_games_diff"), errors="coerce").fillna(0)
+    sp = pd.to_numeric(out.get("season_progress"), errors="coerce").fillna(0.33)
+    out["season_games_diff_feat"] = sg
+    out["season_maturity"] = sp
+    # Did the favorite recently get blown out? Or did the underdog?
+    # These create overreaction in the market.
+    recent_home = pd.to_numeric(out.get("recent_margin_3_diff"), errors="coerce").fillna(0)
+    out["recent_form_vs_spread"] = recent_home - mhm
+    return out
+
+
+# The edge model uses all MATCHUP_FEATURES (team quality) plus the market
+# spread and engineered situational features.
+EDGE_SITUATIONAL = [
+    "market_home_margin",
+    "spread_magnitude",
+    "home_is_underdog",
+    "is_large_spread",
+    "early_season",
+    "elo_spread_disagreement",
+    "season_games_diff_feat",
+    "season_maturity",
+    "recent_form_vs_spread",
+]
+
+EDGE_FEATURES = MATCHUP_FEATURES + EDGE_SITUATIONAL
 
 EDGE_PARAMETER_CANDIDATES = [
     {
         "max_depth": 3,
+        "min_child_weight": 8,
+        "learning_rate": 0.025,
+        "subsample": 0.80,
+        "colsample_bytree": 0.75,
+        "reg_lambda": 6.0,
+    },
+    {
+        "max_depth": 4,
         "min_child_weight": 10,
         "learning_rate": 0.02,
         "subsample": 0.75,
@@ -805,6 +858,7 @@ def train_edge_model(
         return None, {"edge_model": "skipped — no market lines in training data"}
 
     work = game_features.dropna(subset=["home_margin", "market_home_margin", "season"]).copy()
+    work = _build_edge_features(work)
     work["cover_residual"] = work["home_margin"] - work["market_home_margin"]
     if len(work) < 200:
         return None, {"edge_model": "skipped — fewer than 200 games with lines"}
@@ -841,7 +895,7 @@ def train_edge_model(
 
             model = XGBRegressor(
                 objective="reg:squarederror",
-                n_estimators=400,
+                n_estimators=500,
                 n_jobs=-1,
                 random_state=random_state,
                 **parameters,
@@ -861,8 +915,8 @@ def train_edge_model(
         ats = evaluate_ats(
             np.array(fold_actuals), np.array(fold_predicted), np.array(fold_market)
         )
-        # Score by 7pt ATS accuracy, fall back to 5pt.
-        score = ats.get("ats_accuracy_7pt", ats.get("ats_accuracy_5pt", 0.5))
+        # Score by 5pt ATS accuracy — enough games for signal, tight enough for edge.
+        score = ats.get("ats_accuracy_5pt", ats.get("ats_accuracy_3pt", 0.5))
         if isinstance(score, float) and not np.isnan(score) and score > best_score:
             best_score = score
             best_params = parameters
@@ -873,7 +927,7 @@ def train_edge_model(
     matrix = imputer.fit_transform(work.reindex(columns=EDGE_FEATURES))
     final_model = XGBRegressor(
         objective="reg:squarederror",
-        n_estimators=400,
+        n_estimators=500,
         n_jobs=-1,
         random_state=random_state,
         **best_params,
@@ -881,6 +935,13 @@ def train_edge_model(
     final_model.fit(matrix, work["cover_residual"].to_numpy(dtype=float), verbose=False)
     fitted = final_model.predict(matrix)
     residual_std = float(np.std(work["cover_residual"].to_numpy(dtype=float) - fitted, ddof=1))
+
+    # Feature importance for debugging.
+    importance = pd.DataFrame({
+        "feature": EDGE_FEATURES,
+        "importance": final_model.feature_importances_,
+    }).sort_values("importance", ascending=False)
+    atomic_write_csv(importance, models_dir / "edge_model_feature_importance.csv")
 
     bundle = EdgeModelBundle(
         model=final_model,
