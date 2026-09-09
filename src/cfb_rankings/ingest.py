@@ -171,6 +171,30 @@ def normalize_advanced_stats(
     return pd.DataFrame(rows)
 
 
+def normalize_media(payload: Iterable[dict[str, Any]], fetched_at: str) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for item in payload:
+        media_type = _first(item, "mediaType", "media_type", default="")
+        # Keep only TV broadcasts (skip radio, web, PPV, etc.)
+        if str(media_type).lower() not in ("tv", "web", "ppv", ""):
+            pass  # still include — filtering happens downstream
+        rows.append(
+            {
+                "game_id": _first(item, "id"),
+                "season": _first(item, "season"),
+                "week": _first(item, "week"),
+                "season_type": _first(item, "seasonType", "season_type"),
+                "start_date": _first(item, "startDate", "start_date"),
+                "home_team": _first(item, "homeTeam", "home_team"),
+                "away_team": _first(item, "awayTeam", "away_team"),
+                "media_type": media_type,
+                "outlet": _first(item, "outlet", default=""),
+                "fetched_at": fetched_at,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def normalize_lines(payload: Iterable[dict[str, Any]], fetched_at: str) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for game in payload:
@@ -338,6 +362,17 @@ class IngestionPipeline:
         else:
             lines = pd.read_csv(line_path) if line_path.exists() else pd.DataFrame()
         outputs["betting_lines"] = lines
+
+        # Game media / broadcast info (TV channel, outlet).
+        outputs["media"] = self._fetch_and_store(
+            years,
+            self.client.media,
+            normalize_media,
+            "media.csv",
+            ["game_id", "media_type"],
+            optional=True,
+            replace_seasons=True,
+        )
         return {name: len(frame) for name, frame in outputs.items()}
 
     def refresh_current(self, season: int | None = None) -> dict[str, int]:

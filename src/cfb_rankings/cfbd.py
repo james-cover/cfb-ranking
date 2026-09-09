@@ -94,3 +94,6 @@ class CFBDClient:
 
     def fbs_teams(self, year: int) -> list[dict[str, Any]]:
         return self.get("teams/fbs", year=year)
+
+    def media(self, year: int) -> list[dict[str, Any]]:
+        return self.get("games/media", year=year)

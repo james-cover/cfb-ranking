@@ -30,6 +30,7 @@ RAW_FILES = {
     "team_game_stats": "team_game_stats.csv",
     "advanced_game_stats": "advanced_game_stats.csv",
     "lines": "betting_lines.csv",
+    "media": "media.csv",
 }
 
 
@@ -97,6 +98,26 @@ def _current_actual_ap(rankings: pd.DataFrame, season: int) -> pd.DataFrame:
     )
 
 
+def _tv_outlet_lookup(media: pd.DataFrame) -> pd.DataFrame:
+    """Build a game_id → primary TV outlet mapping from raw media data."""
+    if media.empty or "game_id" not in media.columns:
+        return pd.DataFrame(columns=["game_id", "tv_outlet"])
+    tv = media.copy()
+    if "media_type" in tv.columns:
+        # Prefer TV rows; fall back to web/other if no TV row exists.
+        tv["priority"] = tv["media_type"].fillna("").str.lower().map(
+            {"tv": 0, "web": 1, "ppv": 2}
+        ).fillna(3).astype(int)
+    else:
+        tv["priority"] = 0
+    tv = (
+        tv.dropna(subset=["game_id"])
+        .sort_values("priority")
+        .drop_duplicates("game_id", keep="first")
+    )
+    return tv[["game_id", "outlet"]].rename(columns={"outlet": "tv_outlet"})
+
+
 def generate_predictions(settings: Settings) -> dict[str, int]:
     raw = load_raw(settings)
     team_week = read_csv(settings.processed_dir / "team_week_features.csv")
@@ -125,6 +146,10 @@ def generate_predictions(settings: Settings) -> dict[str, int]:
         settings.season,
         next_slate_only=False,
     )
+    # Attach broadcast outlet to upcoming games and season schedule.
+    tv_lookup = _tv_outlet_lookup(raw.get("media", pd.DataFrame()))
+    if not tv_lookup.empty and not all_upcoming.empty:
+        all_upcoming = all_upcoming.merge(tv_lookup, on="game_id", how="left")
     if all_upcoming.empty:
         upcoming = all_upcoming.copy()
     else:
@@ -135,6 +160,8 @@ def generate_predictions(settings: Settings) -> dict[str, int]:
     season_schedule = build_season_schedule(
         raw["games"], raw["lines"], all_upcoming, settings.season, fbs or None
     )
+    if not tv_lookup.empty and not season_schedule.empty:
+        season_schedule = season_schedule.merge(tv_lookup, on="game_id", how="left")
     branding = build_team_branding(
         raw["teams"], settings.season, settings.team_logos_dir
     )

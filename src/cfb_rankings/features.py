@@ -10,13 +10,15 @@ import numpy as np
 import pandas as pd
 
 AP_PATTERN = re.compile(r"associated press|ap top|\bap\b", re.IGNORECASE)
-EARLY_SEASON_PRIOR_GAMES = 4.0
+EARLY_SEASON_PRIOR_GAMES = 2.0
 MODEL_FEATURE_BASELINES = {
     "win_pct": 0.5,
     "points_per_game": 27.0,
     "points_allowed_per_game": 27.0,
     "avg_margin": 0.0,
-    "sos_elo": 1500.0,
+    # sos_elo intentionally excluded — SOS should always reflect actual
+    # opponents faced, even after a single game. Regressing it toward 1500
+    # washes out early-season schedule-strength signal.
     "yards_per_game": 375.0,
     "yards_allowed_per_game": 375.0,
     "turnover_margin_per_game": 0.0,

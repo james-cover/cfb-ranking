@@ -81,9 +81,9 @@ def test_game_rows_use_only_pregame_state():
     assert first["away_games"] == 0
     assert second["away_games"] == 1
     assert second["away_avg_margin"] == 21
-    # Model differentials use a four-game neutral prior, so one result is not
+    # Model differentials use a two-game neutral prior, so one result is not
     # treated as a stable full-season average.
-    assert round(second["avg_margin_diff"], 1) == -8.4
+    assert round(second["avg_margin_diff"], 1) == -14.0
     assert len(weekly) == 4
 
 
