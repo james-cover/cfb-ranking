@@ -30,6 +30,7 @@ dev = [
 
 [project.scripts]
 cfb-rankings = "cfb_rankings.cli:main"
+cfb = "cfb_rankings.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
