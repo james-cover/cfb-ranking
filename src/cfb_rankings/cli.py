@@ -34,6 +34,12 @@ def build_parser() -> argparse.ArgumentParser:
     refresh = commands.add_parser("refresh", help="Refresh one season from the API")
     refresh.add_argument("--season", type=int, default=None)
 
+    box_scores = commands.add_parser(
+        "box-scores", help="Download only passing, rushing, possession, and other team game stats"
+    )
+    box_scores.add_argument("--start-year", type=int, default=2014)
+    box_scores.add_argument("--end-year", type=int, default=None)
+
     commands.add_parser("audit", help="Write and display the CSV data-quality audit")
     commands.add_parser("build-features", help="Create leakage-safe model features")
     commands.add_parser("train", help="Select and train both model families")
@@ -58,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     settings = load_settings(args.project_root)
 
-    if args.command in {"bootstrap", "refresh", "run-all"}:
+    if args.command in {"bootstrap", "refresh", "box-scores", "run-all"}:
         if not settings.cfbd_api_key:
             raise SystemExit(
                 "CFBD_API_KEY is missing. Copy .env.example to .env and add your API key."
@@ -71,6 +77,13 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "refresh":
         season = args.season or settings.season
         _json_print(ingestion.bootstrap(season, season))
+    elif args.command == "box-scores":
+        from .pipeline import box_score_coverage
+
+        frame = ingestion.fetch_team_game_stats(
+            args.start_year, args.end_year or settings.season
+        )
+        _json_print({"team_game_stat_rows": len(frame), **box_score_coverage(frame)})
     elif args.command == "audit":
         print(create_data_audit(settings).to_string(index=False))
     elif args.command == "build-features":

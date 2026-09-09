@@ -280,10 +280,10 @@ class IngestionPipeline:
                     frame = normalizer(payload, fetched_at)
                 frames.append(frame)
                 LOGGER.info("Fetched %s rows for %s %s", len(frame), output_name, year)
-            except CFBDAPIError:
+            except CFBDAPIError as exc:
                 if not optional:
                     raise
-                LOGGER.warning("Optional endpoint for %s failed in %s", output_name, year)
+                LOGGER.warning("Optional endpoint for %s failed in %s: %s", output_name, year, exc)
         new_rows = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         path = self.settings.raw_dir / output_name
         if replace_seasons and not new_rows.empty and "season" in new_rows.columns:
@@ -379,6 +379,17 @@ class IngestionPipeline:
         year = season or self.settings.season
         return self.bootstrap(year, year)
 
+    def fetch_team_game_stats(self, start_year: int, end_year: int) -> pd.DataFrame:
+        """Download only team box scores, preserving rows from successful weeks."""
+        return self._fetch_and_store(
+            range(start_year, end_year + 1),
+            self.client.team_game_stats,
+            normalize_team_game_stats,
+            "team_game_stats.csv",
+            ["game_id", "team"],
+            optional=True,
+        )
+
 
 def audit_raw_data(raw_dir: Path) -> pd.DataFrame:
     required = {
@@ -404,12 +415,17 @@ def audit_raw_data(raw_dir: Path) -> pd.DataFrame:
         rows.append({"file": filename, "status": status, "rows": len(frame), "issue": issue})
     for filename in ("team_game_stats.csv", "advanced_game_stats.csv", "betting_lines.csv"):
         path = raw_dir / filename
+        row_count = len(pd.read_csv(path)) if path.exists() else 0
+        required_stats = filename == "team_game_stats.csv"
         rows.append(
             {
                 "file": filename,
-                "status": "optional" if not path.exists() else "ok",
-                "rows": len(pd.read_csv(path)) if path.exists() else 0,
-                "issue": "endpoint unavailable or not fetched" if not path.exists() else "",
+                "status": ("error" if required_stats else "optional")
+                if not row_count else "ok",
+                "rows": row_count,
+                "issue": "required box scores unavailable or empty"
+                if required_stats and not row_count
+                else ("endpoint unavailable or not fetched" if not row_count else ""),
             }
         )
     return pd.DataFrame(rows)

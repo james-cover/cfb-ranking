@@ -211,6 +211,21 @@ Upcoming-game predictions include the same fields with `home_` and `away_` prefi
 `frontend/index.html` directly; it uses the local image first, the remote URL as a fallback,
 and team initials if neither image is available.
 
+### Repair or refresh team box scores only
+
+If `team_game_stats.csv` is empty, fetch just the missing box-score feed without
+redownloading rankings, lines, or the schedule:
+
+```bash
+cfb box-scores --start-year 2014 --end-year 2026
+cfb build-features
+```
+
+The command preserves successful weeks when CFBD rejects an unavailable week.
+`build-features` will stop instead of silently training unless rushing yards,
+passing yards, and possession time are present. Its output reports the usable
+row count for each required category.
+
 ## Spread/moneyline EV and bet slip
 
 For each game, the backend keeps every provider's most recent quote, uses the median spread,

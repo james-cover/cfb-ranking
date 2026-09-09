@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 import numpy as np
@@ -37,6 +38,39 @@ RAW_FILES = {
     "media": "media.csv",
 }
 
+REQUIRED_BOX_STATS = {
+    "rushingYards": "rushing yards",
+    "netPassingYards": "passing yards",
+    "possessionTime": "time of possession",
+}
+
+
+def box_score_coverage(frame: pd.DataFrame) -> dict[str, int]:
+    """Count usable team-game observations for required, human-readable stats."""
+    counts = {name: 0 for name in REQUIRED_BOX_STATS}
+    if frame.empty or "stats_json" not in frame:
+        return counts
+    for value in frame["stats_json"].dropna():
+        try:
+            stats = json.loads(value) if isinstance(value, str) else {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for name in counts:
+            if stats.get(name) not in (None, ""):
+                counts[name] += 1
+    return counts
+
+
+def require_box_scores(frame: pd.DataFrame) -> dict[str, int]:
+    counts = box_score_coverage(frame)
+    missing = [label for name, label in REQUIRED_BOX_STATS.items() if counts[name] == 0]
+    if missing:
+        raise ValueError(
+            "Team box-score download is incomplete: no " + ", ".join(missing)
+            + ". Run cfb bootstrap again with the repaired downloader; do not train yet."
+        )
+    return counts
+
 
 def load_raw(settings: Settings) -> dict[str, pd.DataFrame]:
     return {name: read_csv(settings.raw_dir / filename) for name, filename in RAW_FILES.items()}
@@ -46,6 +80,7 @@ def build_features(settings: Settings) -> dict[str, int]:
     raw = load_raw(settings)
     if raw["games"].empty:
         raise FileNotFoundError("data/raw/games.csv is missing; run bootstrap first")
+    box_counts = require_box_scores(raw["team_game_stats"])
     game_features, team_week_features = build_sequential_features(
         raw["games"],
         raw["rankings"],
@@ -63,6 +98,9 @@ def build_features(settings: Settings) -> dict[str, int]:
         "game_training_rows": len(game_features),
         "team_week_rows": len(team_week_features),
         "ap_training_rows": len(ap_training),
+        "rushing_stat_rows": box_counts["rushingYards"],
+        "passing_stat_rows": box_counts["netPassingYards"],
+        "possession_stat_rows": box_counts["possessionTime"],
     }
 
 
