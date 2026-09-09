@@ -13,7 +13,7 @@ import pandas as pd
 from sklearn.impute import SimpleImputer
 from xgboost import DMatrix, XGBRegressor
 
-from .evaluation import evaluate_margin_predictions
+from .evaluation import evaluate_ats, evaluate_margin_predictions
 from .features import MATCHUP_FEATURES, model_adjusted_snapshot
 from .storage import atomic_write_csv
 
@@ -119,6 +119,10 @@ def select_and_train_game_model(
     validation_residuals: dict[int, list[float]] = {
         candidate_id: [] for candidate_id in range(1, len(PARAMETER_CANDIDATES) + 1)
     }
+    # Collect validation data for ATS accuracy metrics on the selected candidate.
+    ats_actual: list[float] = []
+    ats_predicted: list[float] = []
+    ats_market: list[float] = []
 
     for validation_season in folds:
         validate = selection_work[
@@ -160,6 +164,13 @@ def select_and_train_game_model(
             validation_residuals[candidate_id].extend(
                 (validate["home_margin"].to_numpy(dtype=float) - predicted).tolist()
             )
+            # Accumulate ATS data for the selected candidate across all folds.
+            if "market_home_margin" in validate.columns:
+                has_line = validate["market_home_margin"].notna()
+                if has_line.any():
+                    ats_actual.extend(validate.loc[has_line, "home_margin"].to_numpy(dtype=float).tolist())
+                    ats_predicted.extend(predicted[has_line.to_numpy()].tolist())
+                    ats_market.extend(validate.loc[has_line, "market_home_margin"].to_numpy(dtype=float).tolist())
             evidence_rows.append(
                 {
                     "candidate": candidate_id,
@@ -255,6 +266,14 @@ def select_and_train_game_model(
     (models_dir / "game_model_metadata.json").write_text(
         json.dumps(metadata, indent=2), encoding="utf-8"
     )
+    # Compute ATS accuracy at multiple thresholds across all validation folds.
+    if ats_actual:
+        ats_metrics = evaluate_ats(
+            np.array(ats_actual), np.array(ats_predicted), np.array(ats_market)
+        )
+        for key, value in ats_metrics.items():
+            comparison_summary.loc[comparison_summary["selected"], key] = value
+
     return bundle, comparison_summary
 
 

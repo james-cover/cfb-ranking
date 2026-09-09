@@ -86,6 +86,7 @@ class TeamState:
     offense_success_rate_sum: float = 0.0
     defense_success_rate_sum: float = 0.0
     advanced_games: int = 0
+    season_games: int = 0  # games played this season only — resets each year
     recent_margins: list[float] = field(default_factory=list)
     results: list[tuple[str, int]] = field(default_factory=list)
     # Opponent-quality-weighted accumulators.  Each game's contribution is
@@ -104,6 +105,7 @@ class TeamState:
             "team": self.team,
             "elo": self.elo,
             "games": self.games,
+            "season_games": self.season_games,
             "wins": self.wins,
             "losses": self.losses,
             "ties": self.ties,
@@ -157,6 +159,7 @@ class TeamState:
 TEAM_NUMERIC_FEATURES = [
     "elo",
     "games",
+    "season_games",
     "wins",
     "losses",
     "win_pct",
@@ -184,6 +187,7 @@ TEAM_NUMERIC_FEATURES = [
 MATCHUP_FEATURES = [
     "elo_diff",
     "games_diff",
+    "season_games_diff",
     "wins_diff",
     "losses_diff",
     "win_pct_diff",
@@ -381,7 +385,7 @@ def build_sequential_features(
     advanced_game_stats: pd.DataFrame | None = None,
     *,
     k_factor: float = 20.0,
-    offseason_reversion: float = 0.65,
+    offseason_reversion: float = 0.80,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Build pregame matchup features and post-week snapshots without future leakage."""
     if games.empty:
@@ -467,6 +471,8 @@ def build_sequential_features(
                 home_elo_before, away_elo_before = home.elo, away.elo
                 home.games += 1
                 away.games += 1
+                home.season_games += 1
+                away.season_games += 1
                 home.points_for += float(game.home_points)
                 home.points_against += float(game.away_points)
                 away.points_for += float(game.away_points)

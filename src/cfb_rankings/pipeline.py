@@ -75,11 +75,15 @@ def train_models(settings: Settings) -> dict[str, object]:
         settings.models_dir,
         validation_cutoff_season=settings.season,
     )
+    selected_row = game_evidence.iloc[0]
+    ats_keys = [c for c in game_evidence.columns if c.startswith("ats_")]
+    ats_output = {k: (float(selected_row[k]) if not pd.isna(selected_row[k]) else None) for k in ats_keys}
     return {
         "ap_champion": ap_bundle.name,
         "ap_selection_score": float(ap_evidence.iloc[0]["selection_score"]),
-        "game_validation_mae": float(game_evidence.iloc[0]["mae"]),
-        "game_winner_accuracy": float(game_evidence.iloc[0]["winner_accuracy"]),
+        "game_validation_mae": float(selected_row["mae"]),
+        "game_winner_accuracy": float(selected_row["winner_accuracy"]),
+        **ats_output,
     }
 
 

@@ -84,3 +84,33 @@ def evaluate_margin_predictions(actual: np.ndarray, predicted: np.ndarray) -> di
         "rmse": float(math.sqrt(mean_squared_error(actual, predicted))),
         "winner_accuracy": winner_accuracy,
     }
+
+
+def evaluate_ats(
+    actual_home_margin: np.ndarray,
+    predicted_home_margin: np.ndarray,
+    market_home_margin: np.ndarray,
+    thresholds: tuple[int, ...] = (3, 5, 7, 10),
+) -> dict[str, float]:
+    """ATS accuracy at multiple model-vs-market edge thresholds.
+
+    A bet is placed on the home team when predicted_home_margin > market_home_margin
+    by at least `threshold` points, and on the away team when the reverse is true.
+    """
+    actual = np.asarray(actual_home_margin, dtype=float)
+    predicted = np.asarray(predicted_home_margin, dtype=float)
+    market = np.asarray(market_home_margin, dtype=float)
+    model_edge = predicted - market
+    results: dict[str, float] = {}
+    for threshold in thresholds:
+        has_edge = np.abs(model_edge) >= threshold
+        if not has_edge.any():
+            results[f"ats_accuracy_{threshold}pt"] = float("nan")
+            results[f"ats_games_{threshold}pt"] = 0
+            continue
+        bet_home = model_edge[has_edge] >= threshold
+        actual_edge = actual[has_edge] - market[has_edge]
+        covered = np.where(bet_home, actual_edge > 0, actual_edge < 0)
+        results[f"ats_accuracy_{threshold}pt"] = float(np.mean(covered))
+        results[f"ats_games_{threshold}pt"] = int(has_edge.sum())
+    return results
