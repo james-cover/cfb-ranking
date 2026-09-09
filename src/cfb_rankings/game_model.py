@@ -763,31 +763,27 @@ def build_season_schedule(
 # ---------------------------------------------------------------------------
 
 
+def _safe_col(df: pd.DataFrame, name: str, default: float = 0.0) -> pd.Series:
+    """Safely extract a numeric column, returning a filled Series even if missing."""
+    if name in df.columns:
+        return pd.to_numeric(df[name], errors="coerce").fillna(default)
+    return pd.Series(default, index=df.index)
+
+
 def _build_edge_features(df: pd.DataFrame) -> pd.DataFrame:
     """Engineer situational columns that expose known market inefficiencies."""
     out = df.copy()
-    mhm = pd.to_numeric(out.get("market_home_margin"), errors="coerce").fillna(0)
-    # How big is the spread? Large spreads have more variance and are harder to set.
+    mhm = _safe_col(out, "market_home_margin")
     out["spread_magnitude"] = mhm.abs()
-    # Is the home team an underdog? Home dogs historically cover at ~52-53%.
     out["home_is_underdog"] = (mhm < 0).astype(float)
-    # Is this a massive spread? 20+ point favorites often don't cover.
     out["is_large_spread"] = (mhm.abs() >= 20).astype(float)
-    # Early season flag — weeks 1-3 have the weakest lines.
-    week = pd.to_numeric(out.get("week", out.get("season_progress", 0) * 15), errors="coerce").fillna(5)
+    week = _safe_col(out, "week", 5.0)
     out["early_season"] = (week <= 3).astype(float)
-    # Elo vs spread disagreement — when Elo says one thing and the market says
-    # another by a wide margin, one of them is wrong.
-    elo_margin = pd.to_numeric(out.get("elo_diff"), errors="coerce").fillna(0) * 0.04
+    elo_margin = _safe_col(out, "elo_diff") * 0.04
     out["elo_spread_disagreement"] = elo_margin - mhm
-    # How many games has each team played? Both 1-game teams = low confidence.
-    sg = pd.to_numeric(out.get("season_games_diff"), errors="coerce").fillna(0)
-    sp = pd.to_numeric(out.get("season_progress"), errors="coerce").fillna(0.33)
-    out["season_games_diff_feat"] = sg
-    out["season_maturity"] = sp
-    # Did the favorite recently get blown out? Or did the underdog?
-    # These create overreaction in the market.
-    recent_home = pd.to_numeric(out.get("recent_margin_3_diff"), errors="coerce").fillna(0)
+    out["season_games_diff_feat"] = _safe_col(out, "season_games_diff")
+    out["season_maturity"] = _safe_col(out, "season_progress", 0.33)
+    recent_home = _safe_col(out, "recent_margin_3_diff")
     out["recent_form_vs_spread"] = recent_home - mhm
     return out
 

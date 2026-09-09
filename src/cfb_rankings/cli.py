@@ -39,6 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("train", help="Select and train both model families")
     commands.add_parser("predict", help="Generate current rankings and next-game forecasts")
     commands.add_parser("go", help="install -e ., build-features, train, predict in one shot")
+    commands.add_parser("edge-audit", help="Scan features for ATS correlation — find what actually predicts covers")
 
     run_all = commands.add_parser("run-all", help="Refresh current data through predictions")
     run_all.add_argument("--season", type=int, default=None)
@@ -83,6 +84,29 @@ def main(argv: list[str] | None = None) -> int:
         _json_print(build_features(settings))
         _json_print(train_models(settings))
         _json_print(generate_predictions(settings))
+    elif args.command == "edge-audit":
+        import pandas as pd
+
+        from .evaluation import ats_feature_scan
+        from .features import MATCHUP_FEATURES
+        from .game_model import _build_edge_features, consensus_current_lines, EDGE_SITUATIONAL
+        from .storage import read_csv
+
+        game_training = read_csv(settings.processed_dir / "game_training_data.csv")
+        raw_lines = read_csv(settings.raw_dir / "betting_lines.csv")
+        if not raw_lines.empty and not game_training.empty:
+            lines_lookup = consensus_current_lines(raw_lines)[["game_id", "market_home_margin"]]
+            game_training = game_training.merge(lines_lookup, on="game_id", how="left")
+        game_training = _build_edge_features(game_training)
+        all_features = MATCHUP_FEATURES + EDGE_SITUATIONAL
+        result = ats_feature_scan(game_training, all_features)
+        print("\n=== ATS FEATURE SCAN ===")
+        print("Features sorted by correlation with covering the spread.\n")
+        print(result.to_string(index=False))
+        print(f"\nTotal games with lines: {len(game_training.dropna(subset=['market_home_margin']))}")
+        from .storage import atomic_write_csv
+        atomic_write_csv(result, settings.models_dir / "ats_feature_scan.csv")
+        print(f"Saved to {settings.models_dir / 'ats_feature_scan.csv'}")
     elif args.command == "run-all":
         season = args.season or settings.season
         results = {

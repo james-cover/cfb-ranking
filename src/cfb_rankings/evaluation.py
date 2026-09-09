@@ -114,3 +114,56 @@ def evaluate_ats(
         results[f"ats_accuracy_{threshold}pt"] = float(np.mean(covered))
         results[f"ats_games_{threshold}pt"] = int(has_edge.sum())
     return results
+
+
+def ats_feature_scan(
+    game_features: pd.DataFrame,
+    feature_columns: list[str],
+) -> pd.DataFrame:
+    """For each feature, compute its correlation with the cover residual
+    and ATS accuracy when the feature is above/below median.
+
+    Returns a DataFrame sorted by absolute correlation — the features at
+    the top are the ones that actually predict covering the spread.
+    """
+    work = game_features.dropna(subset=["home_margin", "market_home_margin"]).copy()
+    work["cover_residual"] = work["home_margin"] - work["market_home_margin"]
+    work["home_covered"] = (work["cover_residual"] > 0).astype(int)
+
+    rows: list[dict[str, object]] = []
+    for feature in feature_columns:
+        if feature not in work.columns:
+            continue
+        col = pd.to_numeric(work[feature], errors="coerce")
+        valid = col.dropna()
+        if len(valid) < 100:
+            continue
+
+        corr = float(col.corr(work["cover_residual"]))
+        median = float(col.median())
+
+        above = work[col > median]
+        below = work[col <= median]
+        ats_above = float(above["home_covered"].mean()) if len(above) > 30 else float("nan")
+        ats_below = float(below["home_covered"].mean()) if len(below) > 30 else float("nan")
+
+        # Also check top/bottom quartile for stronger effects
+        q75 = float(col.quantile(0.75))
+        q25 = float(col.quantile(0.25))
+        top_q = work[col >= q75]
+        bot_q = work[col <= q25]
+        ats_top_q = float(top_q["home_covered"].mean()) if len(top_q) > 30 else float("nan")
+        ats_bot_q = float(bot_q["home_covered"].mean()) if len(bot_q) > 30 else float("nan")
+
+        rows.append({
+            "feature": feature,
+            "corr_with_cover": round(corr, 4),
+            "abs_corr": round(abs(corr), 4),
+            "ats_above_median": round(ats_above, 4) if not np.isnan(ats_above) else None,
+            "ats_below_median": round(ats_below, 4) if not np.isnan(ats_below) else None,
+            "ats_top_quartile": round(ats_top_q, 4) if not np.isnan(ats_top_q) else None,
+            "ats_bottom_quartile": round(ats_bot_q, 4) if not np.isnan(ats_bot_q) else None,
+            "n_games": len(valid),
+        })
+
+    return pd.DataFrame(rows).sort_values("abs_corr", ascending=False).reset_index(drop=True)
