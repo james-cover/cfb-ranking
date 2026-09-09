@@ -38,6 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("build-features", help="Create leakage-safe model features")
     commands.add_parser("train", help="Select and train both model families")
     commands.add_parser("predict", help="Generate current rankings and next-game forecasts")
+    commands.add_parser("go", help="install -e ., build-features, train, predict in one shot")
 
     run_all = commands.add_parser("run-all", help="Refresh current data through predictions")
     run_all.add_argument("--season", type=int, default=None)
@@ -76,6 +77,11 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "train":
         _json_print(train_models(settings))
     elif args.command == "predict":
+        _json_print(generate_predictions(settings))
+    elif args.command == "go":
+        subprocess.call([sys.executable, "-m", "pip", "install", "-e", "."])
+        _json_print(build_features(settings))
+        _json_print(train_models(settings))
         _json_print(generate_predictions(settings))
     elif args.command == "run-all":
         season = args.season or settings.season
