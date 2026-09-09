@@ -83,10 +83,11 @@ def test_app_exposes_api_before_static_frontend(tmp_path):
     app = create_app(settings)
     paths = [getattr(route, "path", "") for route in app.routes]
 
-    assert paths[:4] == [
+    assert paths[:5] == [
         "/api/health",
         "/api/rankings",
         "/api/games",
+        "/api/schedule",
         "/api/teams/{team:str}",
     ]
     assert paths[-1] == ""

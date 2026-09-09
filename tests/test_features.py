@@ -81,7 +81,52 @@ def test_game_rows_use_only_pregame_state():
     assert first["away_games"] == 0
     assert second["away_games"] == 1
     assert second["away_avg_margin"] == 21
+    # Model differentials use a four-game neutral prior, so one result is not
+    # treated as a stable full-season average.
+    assert round(second["avg_margin_diff"], 1) == -8.4
     assert len(weekly) == 4
+
+
+def test_lower_division_elo_does_not_carry_into_a_new_season():
+    games = pd.DataFrame(
+        [
+            {
+                "game_id": 1,
+                "season": 2024,
+                "week": 1,
+                "season_type": "regular",
+                "start_date": "2024-08-31T18:00:00Z",
+                "completed": True,
+                "neutral_site": False,
+                "home_team": "FCS Power",
+                "away_team": "Alpha",
+                "home_points": 35,
+                "away_points": 10,
+            },
+            {
+                "game_id": 2,
+                "season": 2025,
+                "week": 1,
+                "season_type": "regular",
+                "start_date": "2025-08-31T18:00:00Z",
+                "completed": True,
+                "neutral_site": False,
+                "home_team": "FCS Power",
+                "away_team": "Alpha",
+                "home_points": 21,
+                "away_points": 20,
+            },
+        ]
+    )
+    teams = pd.DataFrame(
+        [
+            {"season": 2024, "team": "Alpha"},
+            {"season": 2025, "team": "Alpha"},
+        ]
+    )
+    game_features, _ = build_sequential_features(games, teams=teams)
+    assert game_features.iloc[0]["home_elo"] == 1350.0
+    assert game_features.iloc[1]["home_elo"] == 1350.0
 
 
 def test_ap_target_uses_previous_week_features_and_poll():
@@ -99,4 +144,3 @@ def test_ap_target_uses_previous_week_features_and_poll():
     assert alpha_week_2["games"] == 1
     assert alpha_week_2["previous_ap_rank"] == 20
     assert alpha_week_2["actual_ap_rank"] == 12
-

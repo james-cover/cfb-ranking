@@ -55,6 +55,7 @@ def create_app(settings: Settings | None = None) -> Starlette:
     settings = settings or load_settings()
     rankings = CsvCache(settings.predictions_dir / "current_rankings.csv")
     games = CsvCache(settings.predictions_dir / "upcoming_game_predictions.csv")
+    schedule = CsvCache(settings.predictions_dir / "season_schedule.csv")
 
     async def health(_request: Request) -> JSONResponse:
         ranking_rows = rankings.read()
@@ -66,6 +67,7 @@ def create_app(settings: Settings | None = None) -> Starlette:
                 "games_ready": bool(game_rows),
                 "ranking_count": len(ranking_rows),
                 "game_count": len(game_rows),
+                "schedule_count": len(schedule.read()),
             },
             headers={"Cache-Control": "no-store"},
         )
@@ -82,6 +84,12 @@ def create_app(settings: Settings | None = None) -> Starlette:
             headers={"Cache-Control": "no-cache"},
         )
 
+    async def schedule_data(_request: Request) -> JSONResponse:
+        return JSONResponse(
+            _payload(schedule.read()),
+            headers={"Cache-Control": "no-cache"},
+        )
+
     async def team_data(request: Request) -> JSONResponse:
         requested = request.path_params["team"].casefold()
         team = next(
@@ -93,7 +101,7 @@ def create_app(settings: Settings | None = None) -> Starlette:
         team_name = str(team["team"])
         team_games = [
             row
-            for row in games.read()
+            for row in schedule.read()
             if row.get("home_team") == team_name or row.get("away_team") == team_name
         ]
         return JSONResponse(
@@ -105,6 +113,7 @@ def create_app(settings: Settings | None = None) -> Starlette:
         Route("/api/health", health),
         Route("/api/rankings", ranking_data),
         Route("/api/games", game_data),
+        Route("/api/schedule", schedule_data),
         Route("/api/teams/{team:str}", team_data),
         Mount(
             "/team_logos",

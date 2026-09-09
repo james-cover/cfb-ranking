@@ -10,6 +10,22 @@ import numpy as np
 import pandas as pd
 
 AP_PATTERN = re.compile(r"associated press|ap top|\bap\b", re.IGNORECASE)
+EARLY_SEASON_PRIOR_GAMES = 4.0
+MODEL_FEATURE_BASELINES = {
+    "win_pct": 0.5,
+    "points_per_game": 27.0,
+    "points_allowed_per_game": 27.0,
+    "avg_margin": 0.0,
+    "sos_elo": 1500.0,
+    "yards_per_game": 375.0,
+    "yards_allowed_per_game": 375.0,
+    "turnover_margin_per_game": 0.0,
+    "offense_ppa": 0.0,
+    "defense_ppa": 0.0,
+    "offense_success_rate": 0.4,
+    "defense_success_rate": 0.4,
+    "recent_margin_3": 0.0,
+}
 
 
 def _safe_float(value: Any) -> float | None:
@@ -253,9 +269,14 @@ def _advanced_stats_lookup(
     return lookup
 
 
-def _initial_elo(team: str, prior_elos: dict[str, float], reversion: float) -> float:
-    prior = prior_elos.get(team, 1500.0)
-    return 1500.0 + reversion * (prior - 1500.0)
+def _initial_elo(
+    team: str,
+    prior_elos: dict[str, float],
+    reversion: float,
+    baseline: float = 1500.0,
+) -> float:
+    prior = prior_elos.get(team, baseline)
+    return baseline + reversion * (prior - baseline)
 
 
 def _elo_expected(home_elo: float, away_elo: float, home_advantage: float) -> float:
@@ -283,14 +304,30 @@ def _prefix_snapshot(snapshot: dict[str, Any], prefix: str) -> dict[str, Any]:
     return {f"{prefix}_{key}": value for key, value in snapshot.items() if key != "team"}
 
 
+def model_adjusted_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Shrink volatile rate stats toward neutral values early in a season.
+
+    Raw records and displayed statistics stay untouched. Only model inputs are adjusted,
+    using a four-game empirical prior so one September blowout is not treated as a stable
+    season-long average.
+    """
+    adjusted = dict(snapshot)
+    games = max(float(adjusted.get("games", 0.0)), 0.0)
+    reliability = games / (games + EARLY_SEASON_PRIOR_GAMES)
+    for feature, baseline in MODEL_FEATURE_BASELINES.items():
+        value = float(adjusted.get(feature, baseline))
+        adjusted[feature] = baseline + reliability * (value - baseline)
+    return adjusted
+
+
 def _matchup_row(
     home: TeamState,
     away: TeamState,
     neutral: bool,
     season_progress: float,
 ) -> dict[str, float]:
-    home_values = home.snapshot()
-    away_values = away.snapshot()
+    home_values = model_adjusted_snapshot(home.snapshot())
+    away_values = model_adjusted_snapshot(away.snapshot())
     features: dict[str, float] = {}
     for name in TEAM_NUMERIC_FEATURES:
         features[f"{name}_diff"] = float(home_values[name]) - float(away_values[name])
@@ -340,15 +377,22 @@ def build_sequential_features(
 
     for season, season_games in work.groupby("season", sort=True):
         known_teams: set[str] = set()
+        season_fbs: set[str] = set()
         if not teams.empty:
             season_teams = teams[pd.to_numeric(teams["season"], errors="coerce").eq(season)]
-            known_teams.update(season_teams["team"].dropna().astype(str))
+            season_fbs.update(season_teams["team"].dropna().astype(str))
+            known_teams.update(season_fbs)
         known_teams.update(season_games["home_team"].dropna().astype(str))
         known_teams.update(season_games["away_team"].dropna().astype(str))
         states = {
             team: TeamState(
                 team=team,
-                elo=_initial_elo(team, previous_season_elos, offseason_reversion),
+                elo=_initial_elo(
+                    team,
+                    previous_season_elos,
+                    offseason_reversion,
+                    baseline=1500.0 if team in season_fbs else 1350.0,
+                ),
             )
             for team in known_teams
         }
@@ -526,7 +570,11 @@ def build_sequential_features(
                         ),
                     }
                 )
-        previous_season_elos = {team: state.elo for team, state in states.items()}
+        # Only FBS membership carries an Elo into the next season. This prevents years of
+        # lower-division results from becoming an inherited top-FBS prior after promotion.
+        previous_season_elos = {
+            team: states[team].elo for team in season_fbs if team in states
+        }
 
     game_features = pd.DataFrame(game_rows)
     team_week_features = pd.DataFrame(weekly_rows)
@@ -674,7 +722,8 @@ def matchup_features_from_snapshots(
     neutral_site: bool,
     week: int,
 ) -> dict[str, float]:
-    home_values, away_values = dict(home), dict(away)
+    home_values = model_adjusted_snapshot(dict(home))
+    away_values = model_adjusted_snapshot(dict(away))
     output: dict[str, float] = {}
     for name in TEAM_NUMERIC_FEATURES:
         output[f"{name}_diff"] = float(home_values.get(name, 0.0)) - float(

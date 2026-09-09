@@ -7,6 +7,7 @@ A live, CSV-backed system that produces:
 3. An independent XGBoost ranking of FBS teams.
 4. Predicted margins and scores for upcoming games, compared with current consensus spreads.
 5. Locally cached team logos and official team colors for the included HTML frontend.
+6. Full-season team schedules, selectable spread and moneyline props, model EV, and a local bet-slip calculator.
 
 The sportsbook spread is **never an input** to the independent model. It is joined only after
 prediction so the model-versus-market comparison remains honest.
@@ -25,6 +26,7 @@ CSV importing remains available only as a fallback. Available endpoints are:
 - `GET /api/health`
 - `GET /api/rankings`
 - `GET /api/games`
+- `GET /api/schedule`
 - `GET /api/teams/{team}`
 - `GET /team_logos/{filename}`
 
@@ -64,6 +66,12 @@ cleanly when a season or API plan does not supply them.
 To rank teams, the trained model predicts every FBS-versus-FBS matchup on a neutral field. A
 team's independent rating is its average predicted margin across those opponents. This makes
 the ranking a direct model output, not a manually weighted polynomial score.
+
+Early-season rate statistics use a four-game neutral prior before entering XGBoost. The raw
+record and displayed statistics remain unchanged, but one blowout cannot masquerade as a
+stable full-season average. Elo persists only for teams that were FBS in the prior season;
+new FBS members do not inherit a lower-division rating. Independent-ranking exports include
+TreeSHAP contribution groups so each team's detail page shows what raised or lowered its rank.
 
 ## Leakage policy
 
@@ -175,6 +183,7 @@ data/
     ├── predicted_ap_poll.csv
     ├── independent_rankings.csv
     ├── upcoming_game_predictions.csv
+    ├── season_schedule.csv
     ├── current_rankings.csv
     ├── ap_prediction_history.csv
     └── game_prediction_history.csv
@@ -201,6 +210,23 @@ The ranking CSVs include `team_id`, `logo_url`, `logo_path`, `team_color`, and `
 Upcoming-game predictions include the same fields with `home_` and `away_` prefixes. Open
 `frontend/index.html` directly; it uses the local image first, the remote URL as a fallback,
 and team initials if neither image is available.
+
+## Spread/moneyline EV and bet slip
+
+For each game, the backend keeps every provider's most recent quote, uses the median spread,
+and selects the best available home and away moneyline. Expected value per $100 is calculated
+for all four selectable outcomes: both teams' spreads and both teams' moneylines. The Highest EV
+view places those prices directly beside each team and sorts the upcoming slate by the strongest
+available model EV.
+
+CFBD supplies spread points but usually does not supply spread juice. When exact spread prices
+are absent, the backend uses a clearly marked standard `-110` assumption. Exact provider spread
+prices are retained and used automatically if `homeSpreadOdds` and `awaySpreadOdds` are present.
+
+The frontend bet slip can mix spread or moneyline parlay legs and single bets. It calculates combined American odds,
+total wager, return if the picks hit, and model-estimated EV. Slip data stays in browser local
+storage and never places a wager. Parlay probability multiplies the leg probabilities and is
+explicitly labeled as an independence approximation because correlated outcomes can invalidate it.
 
 ## Spread conventions
 

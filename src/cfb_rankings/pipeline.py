@@ -14,6 +14,7 @@ from .features import (
     current_ap_feature_frame,
 )
 from .game_model import (
+    build_season_schedule,
     build_independent_rankings,
     load_game_model,
     predict_upcoming_games,
@@ -116,12 +117,23 @@ def generate_predictions(settings: Settings) -> dict[str, int]:
         ].dropna().astype(str)
     )
     independent = build_independent_rankings(game_bundle, season_current, fbs or None)
-    upcoming = predict_upcoming_games(
+    all_upcoming = predict_upcoming_games(
         game_bundle,
         raw["games"],
         season_current,
         raw["lines"],
         settings.season,
+        next_slate_only=False,
+    )
+    if all_upcoming.empty:
+        upcoming = all_upcoming.copy()
+    else:
+        next_week = int(pd.to_numeric(all_upcoming["week"], errors="coerce").min())
+        upcoming = all_upcoming[
+            pd.to_numeric(all_upcoming["week"], errors="coerce").eq(next_week)
+        ].copy()
+    season_schedule = build_season_schedule(
+        raw["games"], raw["lines"], all_upcoming, settings.season, fbs or None
     )
     branding = build_team_branding(
         raw["teams"], settings.season, settings.team_logos_dir
@@ -145,7 +157,9 @@ def generate_predictions(settings: Settings) -> dict[str, int]:
         actual = actual.merge(branding, on="team", how="left")
         predicted_ap = predicted_ap.merge(branding, on="team", how="left")
         independent = independent.merge(branding, on="team", how="left")
-        if not upcoming.empty:
+        def attach_game_branding(frame: pd.DataFrame) -> pd.DataFrame:
+            if frame.empty:
+                return frame
             for side in ("home", "away"):
                 side_branding = branding.rename(
                     columns={
@@ -153,7 +167,11 @@ def generate_predictions(settings: Settings) -> dict[str, int]:
                         **{field: f"{side}_{field}" for field in brand_fields},
                     }
                 )
-                upcoming = upcoming.merge(side_branding, on=f"{side}_team", how="left")
+                frame = frame.merge(side_branding, on=f"{side}_team", how="left")
+            return frame
+
+        upcoming = attach_game_branding(upcoming)
+        season_schedule = attach_game_branding(season_schedule)
     combined = independent.merge(
         actual[["team", "actual_ap_rank", "actual_ap_points"]], on="team", how="left"
     ).merge(
@@ -173,6 +191,7 @@ def generate_predictions(settings: Settings) -> dict[str, int]:
     atomic_write_csv(predicted_ap, settings.predictions_dir / "predicted_ap_poll.csv")
     atomic_write_csv(independent, settings.predictions_dir / "independent_rankings.csv")
     atomic_write_csv(upcoming, settings.predictions_dir / "upcoming_game_predictions.csv")
+    atomic_write_csv(season_schedule, settings.predictions_dir / "season_schedule.csv")
     atomic_write_csv(combined, settings.predictions_dir / "current_rankings.csv")
     upsert_csv(
         predicted_ap,
@@ -193,6 +212,7 @@ def generate_predictions(settings: Settings) -> dict[str, int]:
         "predicted_ap_teams": len(predicted_ap),
         "independent_teams": len(independent),
         "upcoming_games": len(upcoming),
+        "season_games": len(season_schedule),
         "team_logos_cached": int(
             branding["logo_path"].fillna("").ne("").sum()
         ) if not branding.empty else 0,

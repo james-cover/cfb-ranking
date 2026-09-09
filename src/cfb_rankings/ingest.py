@@ -191,6 +191,27 @@ def normalize_lines(payload: Iterable[dict[str, Any]], fetched_at: str) -> pd.Da
                 "spread": _number(_first(line, "spread")),
                 "formatted_spread": _first(line, "formattedSpread", "formatted_spread"),
                 "spread_open": _number(_first(line, "spreadOpen", "spread_open")),
+                # CFBD does not currently guarantee spread-price fields, but retain
+                # them when a provider payload supplies them. The prediction layer
+                # labels its standard -110 fallback explicitly when these are absent.
+                "home_spread_odds": _number(
+                    _first(
+                        line,
+                        "homeSpreadOdds",
+                        "home_spread_odds",
+                        "homeSpreadPrice",
+                        "home_spread_price",
+                    )
+                ),
+                "away_spread_odds": _number(
+                    _first(
+                        line,
+                        "awaySpreadOdds",
+                        "away_spread_odds",
+                        "awaySpreadPrice",
+                        "away_spread_price",
+                    )
+                ),
                 "over_under": _number(_first(line, "overUnder", "over_under")),
                 "over_under_open": _number(
                     _first(line, "overUnderOpen", "over_under_open")
@@ -221,7 +242,9 @@ class IngestionPipeline:
         keys: list[str],
         *,
         optional: bool = False,
+        replace_seasons: bool = False,
     ) -> pd.DataFrame:
+        years = list(years)
         frames: list[pd.DataFrame] = []
         fetched_at = datetime.now(UTC).isoformat()
         for year in years:
@@ -239,6 +262,19 @@ class IngestionPipeline:
                 LOGGER.warning("Optional endpoint for %s failed in %s", output_name, year)
         new_rows = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         path = self.settings.raw_dir / output_name
+        if replace_seasons and not new_rows.empty and "season" in new_rows.columns:
+            existing = pd.read_csv(path) if path.exists() else pd.DataFrame()
+            if not existing.empty and "season" in existing.columns:
+                existing_seasons = pd.to_numeric(existing["season"], errors="coerce")
+                existing = existing[~existing_seasons.isin(years)]
+            combined = pd.concat([existing, new_rows], ignore_index=True)
+            combined = combined.drop_duplicates(keys, keep="last")
+            available = [column for column in keys if column in combined.columns]
+            if available:
+                combined = combined.sort_values(available, kind="stable")
+            combined = combined.reset_index(drop=True)
+            atomic_write_csv(combined, path)
+            return combined
         return upsert_csv(new_rows, path, keys, sort_by=keys)
 
     def bootstrap(self, start_year: int, end_year: int) -> dict[str, int]:
@@ -250,6 +286,7 @@ class IngestionPipeline:
                 normalize_games,
                 "games.csv",
                 ["game_id"],
+                replace_seasons=True,
             ),
             "rankings": self._fetch_and_store(
                 years,

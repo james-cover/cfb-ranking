@@ -53,13 +53,38 @@ class CFBDClient:
         raise CFBDAPIError(f"CFBD request failed for {path}: {last_error}")
 
     def games(self, year: int) -> list[dict[str, Any]]:
-        return self.get("games", year=year, division="fbs")
+        # CFBD API v5 renamed the filter from ``division`` to ``classification``.
+        # Sending the legacy name is silently ignored and returns every division.
+        return self.get("games", year=year, classification="fbs")
 
     def rankings(self, year: int) -> list[dict[str, Any]]:
         return self.get("rankings", year=year)
 
     def team_game_stats(self, year: int) -> list[dict[str, Any]]:
-        return self.get("games/teams", year=year, classification="fbs")
+        # The current endpoint requires week, team, or conference when year is used.
+        # Fetching by week avoids hard-coding a conference list and keeps requests bounded.
+        payload: list[dict[str, Any]] = []
+        for week in range(1, 17):
+            payload.extend(
+                self.get(
+                    "games/teams",
+                    year=year,
+                    week=week,
+                    seasonType="regular",
+                    classification="fbs",
+                )
+            )
+        for week in range(1, 6):
+            payload.extend(
+                self.get(
+                    "games/teams",
+                    year=year,
+                    week=week,
+                    seasonType="postseason",
+                    classification="fbs",
+                )
+            )
+        return payload
 
     def advanced_game_stats(self, year: int) -> list[dict[str, Any]]:
         return self.get("stats/game/advanced", year=year)
@@ -69,4 +94,3 @@ class CFBDClient:
 
     def fbs_teams(self, year: int) -> list[dict[str, Any]]:
         return self.get("teams/fbs", year=year)
-
