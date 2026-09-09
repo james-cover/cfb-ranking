@@ -41,7 +41,7 @@ def favorite_text(row: pd.Series, margin_column: str) -> str:
 
 data = load_outputs()
 st.title("College Football Ranking Lab")
-st.caption("Official AP • Predicted AP • Independent XGBoost ranking • Game margins")
+st.caption("Official AP • Predicted AP • Independent Bayesian ranking • Game margins")
 
 if data["rankings"].empty:
     st.warning(
@@ -101,7 +101,7 @@ with rankings_tab:
         use_container_width=True,
     )
     st.caption(
-        "Independent rating is the average XGBoost-predicted neutral-site margin against "
+        "Independent rating is the average Bayesian-predicted neutral-site margin against "
         "every other FBS team. It is not a manually weighted score."
     )
 
@@ -169,7 +169,7 @@ with evidence_tab:
         st.dataframe(data["ap_evidence"], hide_index=True, use_container_width=True)
         champion = data["ap_evidence"].iloc[0]["model"]
         st.success(f"Selected AP champion: {champion}")
-    st.subheader("Independent XGBoost validation")
+    st.subheader("Independent Bayesian validation")
     if not data["game_evidence"].empty:
         st.dataframe(data["game_evidence"], hide_index=True, use_container_width=True)
     if not data["importance"].empty:

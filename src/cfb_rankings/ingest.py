@@ -130,7 +130,9 @@ def normalize_team_game_stats(
         for team in _first(game, "teams", default=[]) or []:
             base = {
                 "game_id": game_id,
-                "team": _first(team, "school"),
+                # The current CFBD GameTeamStatsTeam schema calls this field
+                # ``team``. Older payloads/examples used ``school``.
+                "team": _first(team, "team", "school"),
                 "conference": _first(team, "conference"),
                 "home_away": _first(team, "homeAway", "home_away"),
                 "points": _first(team, "points"),
@@ -381,7 +383,7 @@ class IngestionPipeline:
 
     def fetch_team_game_stats(self, start_year: int, end_year: int) -> pd.DataFrame:
         """Download only team box scores, preserving rows from successful weeks."""
-        return self._fetch_and_store(
+        frame = self._fetch_and_store(
             range(start_year, end_year + 1),
             self.client.team_game_stats,
             normalize_team_game_stats,
@@ -389,6 +391,15 @@ class IngestionPipeline:
             ["game_id", "team"],
             optional=True,
         )
+        # v0.6 incorrectly read CFBD's `team` field as `school`, creating one
+        # null-key row per game. Remove those unusable legacy rows after the
+        # corrected download has been merged into the CSV.
+        if not frame.empty:
+            frame = frame.dropna(subset=["game_id", "team"]).copy()
+            frame = frame[frame["team"].astype(str).str.strip().ne("")]
+            frame = frame.drop_duplicates(["game_id", "team"], keep="last")
+            atomic_write_csv(frame.reset_index(drop=True), self.settings.raw_dir / "team_game_stats.csv")
+        return frame.reset_index(drop=True)
 
 
 def audit_raw_data(raw_dir: Path) -> pd.DataFrame:

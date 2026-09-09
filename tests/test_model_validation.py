@@ -83,9 +83,10 @@ def synthetic_history():
     return frame
 
 
-def test_real_xgboost_train_save_rank_predict_and_live_edge_inputs(tmp_path):
+def test_bayesian_train_save_rank_predict_and_live_edge_inputs(tmp_path):
     history = synthetic_history()
     bundle, evidence = select_and_train_game_model(history, tmp_path, validation_seasons=1)
+    assert bundle.model_family == "bayesian_ridge"
     assert evidence.iloc[0]['scope'] == 'held_out_test'
     assert evidence.iloc[0]['test_season'] == 2024
     assert evidence.iloc[0]['calibration_season'] == 2023

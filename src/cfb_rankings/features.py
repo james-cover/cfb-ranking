@@ -623,6 +623,9 @@ def build_sequential_features(
                 progress = min(max(int(week), 0) / 15.0, 1.0)
                 matchup = _matchup_row(home, away, neutral, progress)
                 home_margin = float(game.home_points) - float(game.away_points)
+                home_stats = stats_lookup.get((game.game_id, str(game.home_team)), {})
+                away_stats = stats_lookup.get((game.game_id, str(game.away_team)), {})
+                box_score_available = bool(home_stats and away_stats)
                 game_rows.append(
                     {
                         "game_id": game.game_id,
@@ -640,6 +643,7 @@ def build_sequential_features(
                         **matchup,
                         "home_margin": home_margin,
                         "game_total": float(game.home_points) + float(game.away_points),
+                        "box_score_available": box_score_available,
                     }
                 )
 
@@ -711,8 +715,6 @@ def build_sequential_features(
                     )
                 )
 
-                home_stats = stats_lookup.get((game.game_id, str(game.home_team)), {})
-                away_stats = stats_lookup.get((game.game_id, str(game.away_team)), {})
                 home_yards = _find_stat(home_stats, ("totalYards", "total yards"))
                 away_yards = _find_stat(away_stats, ("totalYards", "total yards"))
                 home_turnovers = _find_stat(home_stats, ("turnovers", "turnoversLost"))
@@ -879,8 +881,8 @@ def build_sequential_features(
     if not game_features.empty:
         game_features = game_features[game_features["model_eligible"]].reset_index(drop=True)
     team_week_features = pd.DataFrame(weekly_rows)
-    game_features["feature_schema_version"] = 6
-    team_week_features["feature_schema_version"] = 6
+    game_features["feature_schema_version"] = 7
+    team_week_features["feature_schema_version"] = 7
     return game_features, team_week_features
 
 

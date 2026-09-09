@@ -110,16 +110,24 @@ def test_team_stats_keep_successful_weeks_when_one_week_fails(monkeypatch):
 
 def test_box_score_normalization_and_required_coverage():
     frame = normalize_team_game_stats(
-        [{"id": 1, "teams": [{"school": "Alpha", "stats": [
-            {"category": "rushingYards", "stat": "187"},
-            {"category": "netPassingYards", "stat": "301"},
-            {"category": "possessionTime", "stat": "31:42"},
-        ]}]}],
+        [{"id": 1, "teams": [
+            {"team": "Alpha", "stats": [
+                {"category": "rushingYards", "stat": "187"},
+                {"category": "netPassingYards", "stat": "301"},
+                {"category": "possessionTime", "stat": "31:42"},
+            ]},
+            {"team": "Beta", "stats": [
+                {"category": "rushingYards", "stat": "121"},
+                {"category": "netPassingYards", "stat": "205"},
+                {"category": "possessionTime", "stat": "28:18"},
+            ]},
+        ]}],
         "2026-09-09T00:00:00Z",
     )
+    assert frame["team"].tolist() == ["Alpha", "Beta"]
     assert box_score_coverage(frame) == {
-        "rushingYards": 1, "netPassingYards": 1, "possessionTime": 1,
+        "rushingYards": 2, "netPassingYards": 2, "possessionTime": 2,
     }
-    assert require_box_scores(frame)["possessionTime"] == 1
+    assert require_box_scores(frame)["possessionTime"] == 2
     with pytest.raises(ValueError, match="no time of possession"):
         require_box_scores(frame.assign(stats_json='{"rushingYards":"1","netPassingYards":"2"}'))

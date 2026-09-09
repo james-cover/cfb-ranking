@@ -50,7 +50,11 @@ def box_score_coverage(frame: pd.DataFrame) -> dict[str, int]:
     counts = {name: 0 for name in REQUIRED_BOX_STATS}
     if frame.empty or "stats_json" not in frame:
         return counts
-    for value in frame["stats_json"].dropna():
+    valid = frame
+    if {"game_id", "team"}.issubset(frame.columns):
+        valid = frame.dropna(subset=["game_id", "team"])
+        valid = valid[valid["team"].astype(str).str.strip().ne("")]
+    for value in valid["stats_json"].dropna():
         try:
             stats = json.loads(value) if isinstance(value, str) else {}
         except (json.JSONDecodeError, TypeError):
@@ -88,6 +92,18 @@ def build_features(settings: Settings) -> dict[str, int]:
         raw["team_game_stats"],
         raw["advanced_game_stats"],
     )
+    simple_columns = [
+        "rushing_ypg_diff", "passing_ypg_diff", "possession_time_pg_diff"
+    ]
+    unusable = [
+        name for name in simple_columns
+        if name not in game_features or game_features[name].nunique(dropna=True) <= 1
+    ]
+    if unusable:
+        raise ValueError(
+            "Box scores were downloaded but did not join to games; these model features "
+            f"are constant: {', '.join(unusable)}. Re-run cfb box-scores with v0.7.0."
+        )
     ap_training = build_ap_training_frame(
         team_week_features, raw["rankings"], raw["teams"]
     )
@@ -101,13 +117,14 @@ def build_features(settings: Settings) -> dict[str, int]:
         "rushing_stat_rows": box_counts["rushingYards"],
         "passing_stat_rows": box_counts["netPassingYards"],
         "possession_stat_rows": box_counts["possessionTime"],
+        "box_score_game_rows": int(game_features["box_score_available"].sum()),
     }
 
 
 def train_models(settings: Settings) -> dict[str, object]:
     ap_training = read_csv(settings.processed_dir / "ap_training_data.csv")
     game_training = read_csv(settings.processed_dir / "game_training_data.csv")
-    if "feature_schema_version" not in game_training or not game_training["feature_schema_version"].eq(6).all():
+    if "feature_schema_version" not in game_training or not game_training["feature_schema_version"].eq(7).all():
         raise ValueError("Pregame features are outdated. Run cfb build-features before cfb train.")
     # Join consensus market lines onto the training data so the validation loop
     # can compute ATS accuracy alongside standard margin metrics.
@@ -121,7 +138,7 @@ def train_models(settings: Settings) -> dict[str, object]:
         settings.models_dir,
         validation_cutoff_season=settings.season,
     )
-    _game_bundle, game_evidence = select_and_train_game_model(
+    game_bundle, game_evidence = select_and_train_game_model(
         game_training,
         settings.models_dir,
         validation_cutoff_season=settings.season,
@@ -140,6 +157,8 @@ def train_models(settings: Settings) -> dict[str, object]:
         "ap_selection_score": float(ap_evidence.iloc[0]["selection_score"]),
         "game_validation_mae": float(selected_row["mae"]),
         "game_winner_accuracy": float(selected_row["winner_accuracy"]),
+        "independent_model": game_bundle.model_family,
+        "independent_features": game_bundle.features,
         "raw_model_ats": ats_output,
         "edge_model": edge_output,
     }
@@ -185,7 +204,7 @@ def generate_predictions(settings: Settings) -> dict[str, int]:
     team_week = read_csv(settings.processed_dir / "team_week_features.csv")
     if team_week.empty:
         raise FileNotFoundError("Processed features are missing; run build-features first")
-    if "feature_schema_version" not in team_week or not team_week["feature_schema_version"].eq(6).all():
+    if "feature_schema_version" not in team_week or not team_week["feature_schema_version"].eq(7).all():
         raise ValueError("Team features are outdated. Run cfb build-features, then cfb train.")
     ap_bundle = load_ap_model(settings.models_dir)
     game_bundle = load_game_model(settings.models_dir)

@@ -17,8 +17,8 @@ from .features import MATCHUP_FEATURES, model_adjusted_snapshot
 
 @dataclass
 class GameModelBundle:
-    margin_model: XGBRegressor
-    total_model: XGBRegressor
+    margin_model: Any
+    total_model: Any
     imputer: SimpleImputer
     features: list[str]
     residual_mean: float
@@ -27,23 +27,27 @@ class GameModelBundle:
     residual_q90: float
     selected_parameters: dict[str, Any]
     probability_calibration: tuple[float, float] = (0.0, 0.0)
-    schema_version: int = 6
+    schema_version: int = 7
+    scaler: Any | None = None
+    model_family: str = "xgboost"
+
+    def _matrix(self, frame: pd.DataFrame) -> np.ndarray:
+        matrix = self.imputer.transform(frame.reindex(columns=self.features))
+        return self.scaler.transform(matrix) if self.scaler is not None else matrix
 
     def predict_margin(self, frame: pd.DataFrame) -> np.ndarray:
-        matrix = self.imputer.transform(frame.reindex(columns=self.features))
-        return np.asarray(self.margin_model.predict(matrix), dtype=float)
+        return np.asarray(self.margin_model.predict(self._matrix(frame)), dtype=float)
 
     def predict_total(self, frame: pd.DataFrame) -> np.ndarray:
-        matrix = self.imputer.transform(frame.reindex(columns=self.features))
-        return np.asarray(self.total_model.predict(matrix), dtype=float)
+        return np.asarray(self.total_model.predict(self._matrix(frame)), dtype=float)
 
     def predict_margin_contributions(self, frame: pd.DataFrame) -> np.ndarray:
-        """Return TreeSHAP contributions in the same order as ``self.features``.
-
-        XGBoost appends the expected-value bias as the final column. Keeping it here lets
-        callers verify that feature contributions sum back to the prediction.
-        """
-        matrix = self.imputer.transform(frame.reindex(columns=self.features))
+        """Return feature contributions followed by the model intercept/bias."""
+        matrix = self._matrix(frame)
+        if self.model_family == "bayesian_ridge":
+            contributions = matrix * np.asarray(self.margin_model.coef_, dtype=float)
+            bias = np.full((len(matrix), 1), float(self.margin_model.intercept_))
+            return np.hstack([contributions, bias])
         return np.asarray(
             self.margin_model.get_booster().predict(DMatrix(matrix), pred_contribs=True),
             dtype=float,
@@ -67,7 +71,7 @@ def select_and_train_game_model(
     validation_cutoff_season: int | None = None,
     random_state: int = 42,
 ) -> tuple[GameModelBundle, pd.DataFrame]:
-    from .validated_training import select_and_train_game_model as train
+    from .bayesian_training import select_and_train_bayesian_model as train
 
     return train(
         game_features, models_dir,
@@ -78,12 +82,12 @@ def select_and_train_game_model(
 
 
 def load_game_model(models_dir: Path) -> GameModelBundle:
-    path = models_dir / "independent_xgboost.joblib"
+    path = models_dir / "independent_bayesian.joblib"
     if not path.exists():
-        raise FileNotFoundError("Independent XGBoost model has not been trained yet")
+        raise FileNotFoundError("Independent Bayesian model has not been trained yet")
     bundle = joblib.load(path)
-    if bundle.__dict__.get("schema_version") != 6:
-        raise ValueError("Model predates the v0.6 feature schema. Run cfb build-features and cfb train.")
+    if bundle.__dict__.get("schema_version") != 7:
+        raise ValueError("Independent model is not Bayesian v0.7. Run cfb build-features and cfb train.")
     return bundle
 
 
