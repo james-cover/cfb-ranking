@@ -65,6 +65,13 @@ def build_features(settings: Settings) -> dict[str, int]:
 def train_models(settings: Settings) -> dict[str, object]:
     ap_training = read_csv(settings.processed_dir / "ap_training_data.csv")
     game_training = read_csv(settings.processed_dir / "game_training_data.csv")
+    # Join consensus market lines onto the training data so the validation loop
+    # can compute ATS accuracy alongside standard margin metrics.
+    raw_lines = read_csv(settings.raw_dir / "betting_lines.csv")
+    if not raw_lines.empty and not game_training.empty:
+        from .game_model import consensus_current_lines
+        lines_lookup = consensus_current_lines(raw_lines)[["game_id", "market_home_margin"]]
+        game_training = game_training.merge(lines_lookup, on="game_id", how="left")
     ap_bundle, ap_evidence = select_and_train_ap_model(
         ap_training,
         settings.models_dir,
