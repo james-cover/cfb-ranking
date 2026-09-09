@@ -10,15 +10,13 @@ import numpy as np
 import pandas as pd
 
 AP_PATTERN = re.compile(r"associated press|ap top|\bap\b", re.IGNORECASE)
-EARLY_SEASON_PRIOR_GAMES = 2.0
+EARLY_SEASON_PRIOR_GAMES = 4.0
 MODEL_FEATURE_BASELINES = {
     "win_pct": 0.5,
     "points_per_game": 27.0,
     "points_allowed_per_game": 27.0,
     "avg_margin": 0.0,
-    # sos_elo intentionally excluded — SOS should always reflect actual
-    # opponents faced, even after a single game. Regressing it toward 1500
-    # washes out early-season schedule-strength signal.
+    "sos_elo": 1500.0,
     "yards_per_game": 375.0,
     "yards_allowed_per_game": 375.0,
     "turnover_margin_per_game": 0.0,
@@ -126,6 +124,7 @@ def _find_stat(stats: dict[str, Any], aliases: tuple[str, ...]) -> float | None:
 class TeamState:
     team: str
     elo: float = 1500.0
+    prior_metrics: dict[str, float] = field(default_factory=dict)
     games: int = 0
     wins: int = 0
     losses: int = 0
@@ -183,6 +182,11 @@ class TeamState:
         box_games = max(self.box_games, 1)
         return {
             "team": self.team,
+            "stat_games": self.stat_games,
+            "advanced_games": self.advanced_games,
+            "box_games": self.box_games,
+            **{f"prior_{key}": self.prior_metrics.get(key, baseline)
+               for key, baseline in MODEL_FEATURE_BASELINES.items()},
             "elo": self.elo,
             "games": self.games,
             "season_games": self.season_games,
@@ -297,7 +301,6 @@ TEAM_NUMERIC_FEATURES = [
 MATCHUP_FEATURES = [
     "elo_diff",
     "games_diff",
-    "season_games_diff",
     "wins_diff",
     "losses_diff",
     "win_pct_diff",
@@ -478,11 +481,52 @@ def model_adjusted_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     """
     adjusted = dict(snapshot)
     games = max(float(adjusted.get("games", 0.0)), 0.0)
-    reliability = games / (games + EARLY_SEASON_PRIOR_GAMES)
     for feature, baseline in MODEL_FEATURE_BASELINES.items():
+        count = games
+        if feature in {"yards_per_game", "yards_allowed_per_game", "turnover_margin_per_game"}:
+            count = float(adjusted.get("stat_games", 0))
+        elif feature in {"offense_ppa", "defense_ppa", "offense_success_rate", "defense_success_rate"}:
+            count = float(adjusted.get("advanced_games", 0))
+        elif feature in {"rushing_ypg", "rushing_ypg_allowed", "passing_ypg", "passing_ypg_allowed",
+                         "yards_per_rush", "yards_per_rush_allowed", "yards_per_pass",
+                         "yards_per_pass_allowed", "third_down_pct", "third_down_pct_allowed",
+                         "first_downs_pg", "first_downs_pg_allowed", "penalty_yards_pg",
+                         "possession_time_pg"}:
+            count = float(adjusted.get("box_games", 0))
+        reliability = max(count, 0) / (max(count, 0) + EARLY_SEASON_PRIOR_GAMES)
         value = float(adjusted.get(feature, baseline))
-        adjusted[feature] = baseline + reliability * (value - baseline)
+        prior = float(adjusted.get(f"prior_{feature}", baseline))
+        if not math.isfinite(prior):
+            prior = baseline
+        if not math.isfinite(value):
+            value = prior
+        prior = baseline + 0.65 * (prior - baseline)
+        adjusted[feature] = prior + reliability * (value - prior)
     return adjusted
+
+
+def fbs_team_names(games: pd.DataFrame, teams: pd.DataFrame, season: int) -> set[str]:
+    """Historical game classification takes precedence over today's team roster."""
+    rows = games[pd.to_numeric(games["season"], errors="coerce").eq(season)]
+    result: set[str] = set()
+    has_classification = False
+    for side in ("home", "away"):
+        column = f"{side}_classification"
+        if column not in rows:
+            continue
+        values = rows[column].fillna("").astype(str).str.lower().str.strip()
+        has_classification |= bool(values.ne("").any())
+        result.update(rows.loc[values.eq("fbs"), f"{side}_team"].dropna().astype(str))
+    if has_classification:
+        return result
+    if teams.empty:
+        return set()
+    rows = teams[pd.to_numeric(teams["season"], errors="coerce").eq(season)]
+    if "classification" in rows:
+        values = rows["classification"].fillna("").astype(str).str.lower()
+        if values.ne("").any():
+            rows = rows[values.eq("fbs")]
+    return set(rows["team"].dropna().astype(str))
 
 
 def _matchup_row(
@@ -510,7 +554,7 @@ def build_sequential_features(
     advanced_game_stats: pd.DataFrame | None = None,
     *,
     k_factor: float = 20.0,
-    offseason_reversion: float = 0.80,
+    offseason_reversion: float = 0.65,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Build pregame matchup features and post-week snapshots without future leakage."""
     if games.empty:
@@ -539,19 +583,24 @@ def build_sequential_features(
     game_rows: list[dict[str, Any]] = []
     weekly_rows: list[dict[str, Any]] = []
     previous_season_elos: dict[str, float] = {}
+    previous_profiles: dict[str, dict[str, float]] = {}
 
     for season, season_games in work.groupby("season", sort=True):
         known_teams: set[str] = set()
-        season_fbs: set[str] = set()
+        season_fbs = fbs_team_names(games, teams, int(season))
+        if season_fbs:
+            season_games = season_games[
+                season_games["home_team"].isin(season_fbs)
+                | season_games["away_team"].isin(season_fbs)
+            ]
         if not teams.empty:
-            season_teams = teams[pd.to_numeric(teams["season"], errors="coerce").eq(season)]
-            season_fbs.update(season_teams["team"].dropna().astype(str))
             known_teams.update(season_fbs)
         known_teams.update(season_games["home_team"].dropna().astype(str))
         known_teams.update(season_games["away_team"].dropna().astype(str))
         states = {
             team: TeamState(
                 team=team,
+                prior_metrics=previous_profiles.get(team, {}) if team in season_fbs else {},
                 elo=_initial_elo(
                     team,
                     previous_season_elos,
@@ -583,6 +632,9 @@ def build_sequential_features(
                         "start_date": game.start_date,
                         "home_team": game.home_team,
                         "away_team": game.away_team,
+                        "model_eligible": not season_fbs or (
+                            game.home_team in season_fbs and game.away_team in season_fbs
+                        ),
                         **_prefix_snapshot(home_pre, "home"),
                         **_prefix_snapshot(away_pre, "away"),
                         **matchup,
@@ -606,22 +658,23 @@ def build_sequential_features(
                 away.margin_sum -= home_margin
                 home.opponent_elo_sum += away_elo_before
                 away.opponent_elo_sum += home_elo_before
-                home.recent_margins.append(home_margin)
-                away.recent_margins.append(-home_margin)
+                capped_margin = float(np.clip(home_margin, -35.0, 35.0))
+                home.recent_margins.append(capped_margin)
+                away.recent_margins.append(-capped_margin)
 
                 # Quality-weighted accumulators: scale each game's contribution
                 # by the opponent's Elo relative to the 1500 baseline so that
                 # blowouts against weak opponents don't inflate stats as much.
-                home_opp_quality = away_elo_before / 1500.0
-                away_opp_quality = home_elo_before / 1500.0
-                home.quality_margin_sum += home_margin * home_opp_quality
-                home.quality_score_sum += float(game.home_points) * home_opp_quality
-                home.quality_allowed_sum += float(game.away_points) * home_opp_quality
-                home.quality_weight_sum += home_opp_quality
-                away.quality_margin_sum += (-home_margin) * away_opp_quality
-                away.quality_score_sum += float(game.away_points) * away_opp_quality
-                away.quality_allowed_sum += float(game.home_points) * away_opp_quality
-                away.quality_weight_sum += away_opp_quality
+                home_adjustment = 0.04 * (away_elo_before - 1500.0)
+                away_adjustment = 0.04 * (home_elo_before - 1500.0)
+                home.quality_margin_sum += capped_margin + home_adjustment
+                home.quality_score_sum += float(game.home_points) + home_adjustment / 2
+                home.quality_allowed_sum += float(game.away_points) - home_adjustment / 2
+                home.quality_weight_sum += 1.0
+                away.quality_margin_sum += -capped_margin + away_adjustment
+                away.quality_score_sum += float(game.away_points) + away_adjustment / 2
+                away.quality_allowed_sum += float(game.home_points) - away_adjustment / 2
+                away.quality_weight_sum += 1.0
 
                 if home_margin > 0:
                     home.wins += 1
@@ -813,9 +866,21 @@ def build_sequential_features(
         previous_season_elos = {
             team: states[team].elo for team in season_fbs if team in states
         }
+        previous_profiles = {}
+        for team in season_fbs:
+            if team in states:
+                # Stabilize the profile before one next-season carryover regression.
+                profile = model_adjusted_snapshot(states[team].snapshot())
+                previous_profiles[team] = {
+                    key: profile[key] for key in MODEL_FEATURE_BASELINES
+                }
 
     game_features = pd.DataFrame(game_rows)
+    if not game_features.empty:
+        game_features = game_features[game_features["model_eligible"]].reset_index(drop=True)
     team_week_features = pd.DataFrame(weekly_rows)
+    game_features["feature_schema_version"] = 6
+    team_week_features["feature_schema_version"] = 6
     return game_features, team_week_features
 
 

@@ -86,34 +86,39 @@ def evaluate_margin_predictions(actual: np.ndarray, predicted: np.ndarray) -> di
     }
 
 
-def evaluate_ats(
-    actual_home_margin: np.ndarray,
-    predicted_home_margin: np.ndarray,
-    market_home_margin: np.ndarray,
-    thresholds: tuple[int, ...] = (3, 5, 7, 10),
-) -> dict[str, float]:
-    """ATS accuracy at multiple model-vs-market edge thresholds.
+def wilson_lower(wins: int, count: int) -> float:
+    if not count:
+        return float("nan")
+    p, z = wins / count, 1.96
+    return float((p + z*z/(2*count) - z*math.sqrt(
+        p*(1-p)/count + z*z/(4*count*count))) / (1 + z*z/count))
 
-    A bet is placed on the home team when predicted_home_margin > market_home_margin
-    by at least `threshold` points, and on the away team when the reverse is true.
-    """
-    actual = np.asarray(actual_home_margin, dtype=float)
-    predicted = np.asarray(predicted_home_margin, dtype=float)
-    market = np.asarray(market_home_margin, dtype=float)
-    model_edge = predicted - market
-    results: dict[str, float] = {}
+
+def evaluate_ats(
+    actual_home_margin, predicted_home_margin, market_home_margin,
+    thresholds=(0, 2, 3, 5, 7, 10),
+) -> dict[str, float]:
+    """Exclude pushes from accuracy; ROI includes their zero profit and risked stake."""
+    actual = np.asarray(actual_home_margin, float)
+    predicted = np.asarray(predicted_home_margin, float)
+    market = np.asarray(market_home_margin, float)
+    valid = np.isfinite(actual) & np.isfinite(predicted) & np.isfinite(market)
+    edge, result = predicted[valid]-market[valid], actual[valid]-market[valid]
+    output = {}
     for threshold in thresholds:
-        has_edge = np.abs(model_edge) >= threshold
-        if not has_edge.any():
-            results[f"ats_accuracy_{threshold}pt"] = float("nan")
-            results[f"ats_games_{threshold}pt"] = 0
-            continue
-        bet_home = model_edge[has_edge] >= threshold
-        actual_edge = actual[has_edge] - market[has_edge]
-        covered = np.where(bet_home, actual_edge > 0, actual_edge < 0)
-        results[f"ats_accuracy_{threshold}pt"] = float(np.mean(covered))
-        results[f"ats_games_{threshold}pt"] = int(has_edge.sum())
-    return results
+        selected = (np.abs(edge) >= threshold) & (edge != 0)
+        settled = selected & (result != 0)
+        n, pushes = int(settled.sum()), int((selected & (result == 0)).sum())
+        wins = int(((np.sign(edge) == np.sign(result)) & settled).sum())
+        output.update({
+            f"ats_accuracy_{threshold}pt": wins/n if n else float("nan"),
+            f"ats_games_{threshold}pt": n,
+            f"ats_pushes_{threshold}pt": pushes,
+            f"ats_roi_{threshold}pt": (wins*100/110-(n-wins))/(n+pushes)
+                if n+pushes else float("nan"),
+            f"ats_wilson_low_{threshold}pt": wilson_lower(wins, n),
+        })
+    return output
 
 
 def ats_feature_scan(
@@ -124,19 +129,22 @@ def ats_feature_scan(
     and ATS accuracy when the feature is above/below median.
 
     Returns a DataFrame sorted by absolute correlation — the features at
-    the top are the ones that actually predict covering the spread.
+    the top show historical associations, not validated betting signals.
     """
     work = game_features.dropna(subset=["home_margin", "market_home_margin"]).copy()
     work["cover_residual"] = work["home_margin"] - work["market_home_margin"]
-    work["home_covered"] = (work["cover_residual"] > 0).astype(int)
+    work["home_covered"] = np.where(work["cover_residual"].eq(0), np.nan,
+                                    work["cover_residual"].gt(0).astype(float))
 
     rows: list[dict[str, object]] = []
     for feature in feature_columns:
         if feature not in work.columns:
             continue
-        col = pd.to_numeric(work[feature], errors="coerce")
+        col = pd.to_numeric(work[feature], errors="coerce").replace([np.inf, -np.inf], np.nan)
         valid = col.dropna()
         if len(valid) < 100:
+            continue
+        if valid.nunique() < 2 or work.loc[col.notna(), "cover_residual"].nunique() < 2:
             continue
 
         corr = float(col.corr(work["cover_residual"]))
@@ -157,7 +165,7 @@ def ats_feature_scan(
 
         rows.append({
             "feature": feature,
-            "corr_with_cover": round(corr, 4),
+            "corr_with_cover_residual": round(corr, 4),
             "abs_corr": round(abs(corr), 4),
             "ats_above_median": round(ats_above, 4) if not np.isnan(ats_above) else None,
             "ats_below_median": round(ats_below, 4) if not np.isnan(ats_below) else None,
@@ -166,4 +174,6 @@ def ats_feature_scan(
             "n_games": len(valid),
         })
 
+    if not rows:
+        return pd.DataFrame(columns=["feature", "corr_with_cover_residual", "abs_corr"])
     return pd.DataFrame(rows).sort_values("abs_corr", ascending=False).reset_index(drop=True)

@@ -81,9 +81,9 @@ def test_game_rows_use_only_pregame_state():
     assert first["away_games"] == 0
     assert second["away_games"] == 1
     assert second["away_avg_margin"] == 21
-    # Model differentials use a two-game neutral prior, so one result is not
+    # Model differentials use a four-game neutral prior, so one result is not
     # treated as a stable full-season average.
-    assert round(second["avg_margin_diff"], 1) == -14.0
+    assert round(second["avg_margin_diff"], 1) == -8.4
     assert len(weekly) == 4
 
 
@@ -124,9 +124,11 @@ def test_lower_division_elo_does_not_carry_into_a_new_season():
             {"season": 2025, "team": "Alpha"},
         ]
     )
-    game_features, _ = build_sequential_features(games, teams=teams)
-    assert game_features.iloc[0]["home_elo"] == 1350.0
-    assert game_features.iloc[1]["home_elo"] == 1350.0
+    game_features, weekly = build_sequential_features(games, teams=teams)
+    assert game_features.empty  # FBS/FCS games update state but are not training targets.
+    # Alpha's pregame opponent strength remains the FCS baseline both years.
+    alpha = weekly[weekly.team.eq("Alpha")]
+    assert alpha["last_week_opponent_elo"].eq(1350.0).all()
 
 
 def test_ap_target_uses_previous_week_features_and_poll():

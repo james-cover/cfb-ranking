@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import dataclass
 from itertools import combinations
@@ -13,9 +12,7 @@ import pandas as pd
 from sklearn.impute import SimpleImputer
 from xgboost import DMatrix, XGBRegressor
 
-from .evaluation import evaluate_ats, evaluate_margin_predictions
 from .features import MATCHUP_FEATURES, model_adjusted_snapshot
-from .storage import atomic_write_csv
 
 
 @dataclass
@@ -29,6 +26,8 @@ class GameModelBundle:
     residual_q10: float
     residual_q90: float
     selected_parameters: dict[str, Any]
+    probability_calibration: tuple[float, float] = (0.0, 0.0)
+    schema_version: int = 6
 
     def predict_margin(self, frame: pd.DataFrame) -> np.ndarray:
         matrix = self.imputer.transform(frame.reindex(columns=self.features))
@@ -51,47 +50,13 @@ class GameModelBundle:
         )
 
     def win_probability(self, predicted_margin: np.ndarray) -> np.ndarray:
+        from .validated_training import apply_probability
+        return apply_probability(predicted_margin, self.probability_calibration)
+
+    def fundamental_cover_probability(self, predicted_margin: np.ndarray) -> np.ndarray:
         scale = max(self.residual_std, 1e-6)
         z = (np.asarray(predicted_margin, dtype=float) + self.residual_mean) / scale
         return np.asarray([0.5 * (1.0 + math.erf(value / math.sqrt(2.0))) for value in z])
-
-
-PARAMETER_CANDIDATES = [
-    {
-        "max_depth": 3,
-        "min_child_weight": 6,
-        "learning_rate": 0.035,
-        "subsample": 0.85,
-        "colsample_bytree": 0.85,
-        "reg_lambda": 4.0,
-    },
-    {
-        "max_depth": 4,
-        "min_child_weight": 6,
-        "learning_rate": 0.03,
-        "subsample": 0.85,
-        "colsample_bytree": 0.85,
-        "reg_lambda": 5.0,
-    },
-    {
-        "max_depth": 5,
-        "min_child_weight": 8,
-        "learning_rate": 0.025,
-        "subsample": 0.80,
-        "colsample_bytree": 0.85,
-        "reg_lambda": 6.0,
-    },
-]
-
-
-def _new_regressor(parameters: dict[str, Any], random_state: int) -> XGBRegressor:
-    return XGBRegressor(
-        objective="reg:squarederror",
-        n_estimators=700,
-        n_jobs=-1,
-        random_state=random_state,
-        **parameters,
-    )
 
 
 def select_and_train_game_model(
@@ -102,186 +67,24 @@ def select_and_train_game_model(
     validation_cutoff_season: int | None = None,
     random_state: int = 42,
 ) -> tuple[GameModelBundle, pd.DataFrame]:
-    if game_features.empty:
-        raise ValueError("Game training frame is empty")
-    work = game_features.dropna(subset=["home_margin", "game_total", "season"]).copy()
-    selection_work = work
-    if validation_cutoff_season is not None:
-        selection_work = work[
-            pd.to_numeric(work["season"], errors="coerce").lt(validation_cutoff_season)
-        ]
-    seasons = [int(value) for value in sorted(selection_work["season"].astype(int).unique())]
-    if len(seasons) < 3:
-        raise ValueError("At least three seasons are required for game-model validation")
-    folds = seasons[-min(validation_seasons, len(seasons) - 1) :]
-    evidence_rows: list[dict[str, Any]] = []
-    baseline_rows: list[dict[str, Any]] = []
-    validation_residuals: dict[int, list[float]] = {
-        candidate_id: [] for candidate_id in range(1, len(PARAMETER_CANDIDATES) + 1)
-    }
-    # Collect validation data for ATS accuracy metrics on the selected candidate.
-    ats_actual: list[float] = []
-    ats_predicted: list[float] = []
-    ats_market: list[float] = []
+    from .validated_training import select_and_train_game_model as train
 
-    for validation_season in folds:
-        validate = selection_work[
-            selection_work["season"].astype(int).eq(validation_season)
-        ]
-        if validate.empty:
-            continue
-        elo_margin = (
-            0.04 * pd.to_numeric(validate["elo_diff"], errors="coerce").fillna(0)
-            + 2.5 * pd.to_numeric(validate["home_field"], errors="coerce").fillna(0)
-        )
-        baseline_rows.append(
-            {
-                "model": "elo_margin_baseline",
-                "validation_season": validation_season,
-                **evaluate_margin_predictions(
-                    validate["home_margin"].to_numpy(dtype=float), elo_margin.to_numpy()
-                ),
-            }
-        )
-
-    for candidate_id, parameters in enumerate(PARAMETER_CANDIDATES, start=1):
-        for validation_season in folds:
-            train = selection_work[selection_work["season"].astype(int) < validation_season]
-            validate = selection_work[
-                selection_work["season"].astype(int).eq(validation_season)
-            ]
-            if train.empty or validate.empty:
-                continue
-            imputer = SimpleImputer(strategy="median")
-            x_train = imputer.fit_transform(train.reindex(columns=MATCHUP_FEATURES))
-            x_validate = imputer.transform(validate.reindex(columns=MATCHUP_FEATURES))
-            model = _new_regressor(parameters, random_state)
-            model.fit(x_train, train["home_margin"].to_numpy(dtype=float), verbose=False)
-            predicted = model.predict(x_validate)
-            metrics = evaluate_margin_predictions(
-                validate["home_margin"].to_numpy(dtype=float), predicted
-            )
-            validation_residuals[candidate_id].extend(
-                (validate["home_margin"].to_numpy(dtype=float) - predicted).tolist()
-            )
-            # Accumulate ATS data for the selected candidate across all folds.
-            if "market_home_margin" in validate.columns:
-                has_line = validate["market_home_margin"].notna()
-                if has_line.any():
-                    ats_actual.extend(validate.loc[has_line, "home_margin"].to_numpy(dtype=float).tolist())
-                    ats_predicted.extend(predicted[has_line.to_numpy()].tolist())
-                    ats_market.extend(validate.loc[has_line, "market_home_margin"].to_numpy(dtype=float).tolist())
-            evidence_rows.append(
-                {
-                    "candidate": candidate_id,
-                    "validation_season": validation_season,
-                    "parameters": json.dumps(parameters, sort_keys=True),
-                    **metrics,
-                }
-            )
-
-    evidence = pd.DataFrame(evidence_rows)
-    if evidence.empty:
-        raise ValueError("No valid game-model selection folds were produced")
-    summary = (
-        evidence.groupby(["candidate", "parameters"], as_index=False)
-        .agg(
-            folds=("validation_season", "count"),
-            mae=("mae", "mean"),
-            rmse=("rmse", "mean"),
-            winner_accuracy=("winner_accuracy", "mean"),
-        )
-        .sort_values(["mae", "rmse", "winner_accuracy"], ascending=[True, True, False])
-        .reset_index(drop=True)
+    return train(
+        game_features, models_dir,
+        validation_seasons=validation_seasons,
+        validation_cutoff_season=validation_cutoff_season,
+        random_state=random_state,
     )
-    selected_parameters = json.loads(summary.iloc[0]["parameters"])
-    selected_candidate = int(summary.iloc[0]["candidate"])
-    imputer = SimpleImputer(strategy="median")
-    matrix = imputer.fit_transform(work.reindex(columns=MATCHUP_FEATURES))
-    margin_model = _new_regressor(selected_parameters, random_state)
-    total_model = _new_regressor(selected_parameters, random_state + 1)
-    margin_model.fit(matrix, work["home_margin"].to_numpy(dtype=float), verbose=False)
-    total_model.fit(matrix, work["game_total"].to_numpy(dtype=float), verbose=False)
-    residuals = np.asarray(validation_residuals[selected_candidate], dtype=float)
-    if residuals.size == 0:
-        fitted = margin_model.predict(matrix)
-        residuals = work["home_margin"].to_numpy(dtype=float) - fitted
-    bundle = GameModelBundle(
-        margin_model=margin_model,
-        total_model=total_model,
-        imputer=imputer,
-        features=list(MATCHUP_FEATURES),
-        residual_mean=float(np.mean(residuals)),
-        residual_std=float(np.std(residuals, ddof=1)),
-        residual_q10=float(np.quantile(residuals, 0.10)),
-        residual_q90=float(np.quantile(residuals, 0.90)),
-        selected_parameters=selected_parameters,
-    )
-    models_dir.mkdir(parents=True, exist_ok=True)
-    joblib.dump(bundle, models_dir / "independent_xgboost.joblib")
-    atomic_write_csv(evidence, models_dir / "game_model_fold_evidence.csv")
-    xgb_summary = summary.copy()
-    xgb_summary.insert(0, "model", "xgboost_candidate_" + xgb_summary["candidate"].astype(str))
-    xgb_summary.insert(1, "selected", xgb_summary["candidate"].eq(selected_candidate))
-    if baseline_rows:
-        baseline = pd.DataFrame(baseline_rows)
-        baseline_summary = pd.DataFrame(
-            [
-                {
-                    "model": "elo_margin_baseline",
-                    "selected": False,
-                    "candidate": 0,
-                    "parameters": '{"elo_points_per_point": 25, "home_field_points": 2.5}',
-                    "folds": len(baseline),
-                    "mae": baseline["mae"].mean(),
-                    "rmse": baseline["rmse"].mean(),
-                    "winner_accuracy": baseline["winner_accuracy"].mean(),
-                }
-            ]
-        )
-        comparison_summary = pd.concat([xgb_summary, baseline_summary], ignore_index=True)
-    else:
-        comparison_summary = xgb_summary
-    comparison_summary = comparison_summary.sort_values(
-        ["selected", "mae"], ascending=[False, True]
-    ).reset_index(drop=True)
-    atomic_write_csv(comparison_summary, models_dir / "game_model_evidence.csv")
-    importance = pd.DataFrame(
-        {
-            "feature": MATCHUP_FEATURES,
-            "importance": margin_model.feature_importances_,
-        }
-    ).sort_values("importance", ascending=False)
-    atomic_write_csv(importance, models_dir / "game_model_feature_importance.csv")
-    metadata = {
-        "algorithm": "XGBoost regression",
-        "target": "home_points - away_points",
-        "selected_parameters": selected_parameters,
-        "residual_mean": bundle.residual_mean,
-        "residual_std": bundle.residual_std,
-        "validation_seasons": folds,
-        "features": MATCHUP_FEATURES,
-        "sportsbook_spread_used_as_feature": False,
-    }
-    (models_dir / "game_model_metadata.json").write_text(
-        json.dumps(metadata, indent=2), encoding="utf-8"
-    )
-    # Compute ATS accuracy at multiple thresholds across all validation folds.
-    if ats_actual:
-        ats_metrics = evaluate_ats(
-            np.array(ats_actual), np.array(ats_predicted), np.array(ats_market)
-        )
-        for key, value in ats_metrics.items():
-            comparison_summary.loc[comparison_summary["selected"], key] = value
-
-    return bundle, comparison_summary
 
 
 def load_game_model(models_dir: Path) -> GameModelBundle:
     path = models_dir / "independent_xgboost.joblib"
     if not path.exists():
         raise FileNotFoundError("Independent XGBoost model has not been trained yet")
-    return joblib.load(path)
+    bundle = joblib.load(path)
+    if bundle.__dict__.get("schema_version") != 6:
+        raise ValueError("Model predates the v0.6 feature schema. Run cfb build-features and cfb train.")
+    return bundle
 
 
 def _pair_frame(team_a: pd.Series, team_b: pd.Series) -> pd.DataFrame:
@@ -322,11 +125,21 @@ CONTRIBUTION_GROUPS = {
         "offense_success_rate_diff",
         "defense_success_rate_diff",
     },
-    "sos_contribution": {"sos_elo_diff"},
+    "sos_contribution": {"sos_elo_diff", "quality_adj_margin_diff",
+                         "quality_adj_ppg_diff", "quality_adj_ppg_allowed_diff"},
     "quality_wins_contribution": {"ranked_wins_diff", "quality_wins_diff"},
     "bad_losses_contribution": {"bad_losses_diff"},
     "recent_form_contribution": {"recent_margin_3_diff"},
 }
+
+CONTRIBUTION_GROUPS["efficiency_contribution"].update({
+    f"{name}_diff" for name in (
+        "rushing_ypg", "rushing_ypg_allowed", "passing_ypg", "passing_ypg_allowed",
+        "yards_per_rush", "yards_per_rush_allowed", "yards_per_pass", "yards_per_pass_allowed",
+        "third_down_pct", "third_down_pct_allowed", "first_downs_pg", "first_downs_pg_allowed",
+        "penalty_yards_pg", "possession_time_pg",
+    )
+})
 
 
 def build_independent_rankings(
@@ -341,7 +154,7 @@ def build_independent_rankings(
     names = sorted(work.index.astype(str))
     margin_sums = {team: 0.0 for team in names}
     comparisons = {team: 0 for team in names}
-    feature_sums = {team: np.zeros(len(MATCHUP_FEATURES), dtype=float) for team in names}
+    feature_sums = {team: np.zeros(len(bundle.features), dtype=float) for team in names}
     pair_names: list[tuple[str, str]] = []
     comparison_rows: list[dict[str, float]] = []
     for team_a, team_b in combinations(names, 2):
@@ -356,7 +169,7 @@ def build_independent_rankings(
     predicted_contributions = (
         bundle.predict_margin_contributions(pd.DataFrame(comparison_rows))
         if comparison_rows
-        else np.empty((0, len(MATCHUP_FEATURES) + 1), dtype=float)
+        else np.empty((0, len(bundle.features) + 1), dtype=float)
     )
     for pair_index, (team_a, team_b) in enumerate(pair_names):
         forward = float(predicted_margins[2 * pair_index])
@@ -376,7 +189,7 @@ def build_independent_rankings(
     for team in names:
         state = work.loc[team]
         average_contributions = feature_sums[team] / max(comparisons[team], 1)
-        by_feature = dict(zip(MATCHUP_FEATURES, average_contributions, strict=True))
+        by_feature = dict(zip(bundle.features, average_contributions, strict=True))
         grouped_contributions = {
             output_name: float(sum(by_feature.get(feature, 0.0) for feature in features))
             for output_name, features in CONTRIBUTION_GROUPS.items()
@@ -490,8 +303,8 @@ def consensus_current_lines(lines: pd.DataFrame) -> pd.DataFrame:
             {
                 "game_id": game_id,
                 "consensus_spread": consensus_spread,
-                "home_spread": consensus_spread,
-                "away_spread": -consensus_spread if pd.notna(consensus_spread) else np.nan,
+                "home_spread": spread_quote["spread"] if spread_quote is not None else np.nan,
+                "away_spread": -spread_quote["spread"] if spread_quote is not None else np.nan,
                 "home_spread_odds": home_spread_odds,
                 "away_spread_odds": away_spread_odds,
                 "spread_odds_sportsbook": (
@@ -518,7 +331,8 @@ def consensus_current_lines(lines: pd.DataFrame) -> pd.DataFrame:
         )
     aggregated = pd.DataFrame(rows)
     # CFBD's spread is the home-team handicap, so -3 implies a home margin of +3.
-    aggregated["market_home_margin"] = -aggregated["consensus_spread"]
+    # Attach prices to their actual quoted handicap, not an unbettable median.
+    aggregated["market_home_margin"] = -aggregated["home_spread"]
     return aggregated
 
 
@@ -619,10 +433,12 @@ def predict_upcoming_games(
     no_moneyline = output[["home_moneyline", "away_moneyline"]].isna().all(axis=1)
     output.loc[no_moneyline, ["best_moneyline_team", "best_moneyline", "best_ev_100"]] = np.nan
     output["model_edge_home"] = output["model_home_margin"] - output["market_home_margin"]
-    output["cover_probability_home"] = bundle.win_probability(
-        output["model_edge_home"].fillna(0).to_numpy()
-    )
-    output.loc[output["market_home_margin"].isna(), "cover_probability_home"] = np.nan
+    output["fundamental_edge_home"] = output["model_edge_home"]
+    output["edge_model_validated"] = False
+    output["betting_model_home_margin"] = np.nan
+    # A winner probability is not a cover probability. Populate spread EV only
+    # after the separately calibrated market-aware model passes its guardrails.
+    output["cover_probability_home"] = np.nan
     output["cover_probability_away"] = 1.0 - output["cover_probability_home"]
     output["home_spread_ev_100"] = _moneyline_expected_value(
         output["cover_probability_home"], output["home_spread_odds"]
@@ -635,6 +451,32 @@ def predict_upcoming_games(
         "No line",
         np.where(output["model_edge_home"] >= 0, output["home_team"], output["away_team"]),
     )
+    output = refresh_best_props(output)
+    keep = [
+        "game_id", "start_date", "week", "away_team", "home_team", "neutral_site",
+        "predicted_away_score", "predicted_home_score", "model_home_margin",
+        "margin_low_80", "margin_high_80", "home_win_probability", "consensus_spread",
+        "market_home_margin", "model_edge_home", "cover_probability_home",
+        "cover_probability_away", "model_ats_lean", "home_spread", "away_spread",
+        "home_spread_odds", "away_spread_odds", "spread_odds_sportsbook",
+        "spread_odds_estimated", "home_spread_ev_100", "away_spread_ev_100",
+        "home_moneyline", "away_moneyline", "home_moneyline_sportsbook",
+        "away_moneyline_sportsbook", "home_moneyline_ev_100", "away_moneyline_ev_100",
+        "best_moneyline_team", "best_moneyline", "best_ev_100", "sportsbooks",
+        "best_prop_team", "best_prop_type", "best_prop_line", "best_prop_odds",
+        "best_prop_ev_100", "line_fetched_at", "fundamental_edge_home",
+        "edge_model_validated", "betting_model_home_margin",
+    ]
+    # Preserve pregame inputs for the edge model which runs after this function.
+    keep = list(dict.fromkeys(keep + [f for f in MATCHUP_FEATURES if f in output]))
+    return output[keep].sort_values("start_date").reset_index(drop=True)
+
+
+def refresh_best_props(output: pd.DataFrame) -> pd.DataFrame:
+    """Recompute displayed best plays after any probability/EV update."""
+    if output.empty:
+        return output
+    output = output.drop(columns=[c for c in output if c.startswith("best_prop_")])
     prop_specs = [
         ("home", "spread", "home_spread", "home_spread_odds", "home_spread_ev_100"),
         ("away", "spread", "away_spread", "away_spread_odds", "away_spread_ev_100"),
@@ -670,21 +512,35 @@ def predict_upcoming_games(
             }
         )
     output = pd.concat([output.reset_index(drop=True), pd.DataFrame(best_prop_rows)], axis=1)
-    keep = [
-        "game_id", "start_date", "week", "away_team", "home_team", "neutral_site",
-        "predicted_away_score", "predicted_home_score", "model_home_margin",
-        "margin_low_80", "margin_high_80", "home_win_probability", "consensus_spread",
-        "market_home_margin", "model_edge_home", "cover_probability_home",
-        "cover_probability_away", "model_ats_lean", "home_spread", "away_spread",
-        "home_spread_odds", "away_spread_odds", "spread_odds_sportsbook",
-        "spread_odds_estimated", "home_spread_ev_100", "away_spread_ev_100",
-        "home_moneyline", "away_moneyline", "home_moneyline_sportsbook",
-        "away_moneyline_sportsbook", "home_moneyline_ev_100", "away_moneyline_ev_100",
-        "best_moneyline_team", "best_moneyline", "best_ev_100", "sportsbooks",
-        "best_prop_team", "best_prop_type", "best_prop_line", "best_prop_odds",
-        "best_prop_ev_100", "line_fetched_at",
-    ]
-    return output[keep].sort_values("start_date").reset_index(drop=True)
+    return output
+
+
+def apply_edge_predictions(output: pd.DataFrame, bundle: EdgeModelBundle | None) -> pd.DataFrame:
+    """Use the validated calibration and retain a distinct independent margin."""
+    if output.empty or bundle is None or not bundle.validated:
+        return refresh_best_props(output)
+    output = output.copy()
+    mask = output["market_home_margin"].notna()
+    if mask.any():
+        edge = bundle.predict_edge(_build_edge_features(output.loc[mask].copy()))
+        probability = bundle.cover_probability(edge)
+        output.loc[mask, "model_edge_home"] = edge
+        output.loc[mask, "betting_model_home_margin"] = output.loc[mask, "market_home_margin"] + edge
+        output.loc[mask, "edge_model_validated"] = True
+        output.loc[mask, "cover_probability_home"] = probability
+        output.loc[mask, "cover_probability_away"] = 1 - probability
+        output.loc[mask, "model_ats_lean"] = np.where(
+            probability >= .5, output.loc[mask, "home_team"], output.loc[mask, "away_team"]
+        )
+        for side in ("home", "away"):
+            output.loc[mask, f"{side}_spread_ev_100"] = _moneyline_expected_value(
+                output.loc[mask, f"cover_probability_{side}"], output.loc[mask, f"{side}_spread_odds"]
+            )
+            # Calibration conditions on a decisive result. Without a calibrated
+            # push probability, do not advertise dollar EV for integer lines.
+            integer_line = mask & output["home_spread"].mod(1).eq(0)
+            output.loc[integer_line, f"{side}_spread_ev_100"] = np.nan
+    return refresh_best_props(output)
 
 
 def build_season_schedule(
@@ -797,40 +653,10 @@ EDGE_SITUATIONAL = [
     "is_large_spread",
     "early_season",
     "elo_spread_disagreement",
-    "season_games_diff_feat",
-    "season_maturity",
     "recent_form_vs_spread",
 ]
 
 EDGE_FEATURES = MATCHUP_FEATURES + EDGE_SITUATIONAL
-
-EDGE_PARAMETER_CANDIDATES = [
-    {
-        "max_depth": 3,
-        "min_child_weight": 8,
-        "learning_rate": 0.025,
-        "subsample": 0.80,
-        "colsample_bytree": 0.75,
-        "reg_lambda": 6.0,
-    },
-    {
-        "max_depth": 4,
-        "min_child_weight": 10,
-        "learning_rate": 0.02,
-        "subsample": 0.75,
-        "colsample_bytree": 0.70,
-        "reg_lambda": 8.0,
-    },
-    {
-        "max_depth": 3,
-        "min_child_weight": 12,
-        "learning_rate": 0.015,
-        "subsample": 0.70,
-        "colsample_bytree": 0.65,
-        "reg_lambda": 10.0,
-    },
-]
-
 
 @dataclass
 class EdgeModelBundle:
@@ -838,6 +664,22 @@ class EdgeModelBundle:
     imputer: SimpleImputer
     features: list[str]
     residual_std: float
+    shrinkage: tuple[float, float] = (0.0, 0.0)
+    probability_calibration: tuple[float, float] = (0.0, 0.0)
+    validated: bool = False
+    schema_version: int = 6
+
+    def predict_edge(self, frame):
+        missing = set(self.features) - set(frame.columns)
+        if missing:
+            raise ValueError(f"Missing live edge inputs: {sorted(missing)}")
+        matrix = self.imputer.transform(frame[self.features])
+        raw = np.asarray(self.model.predict(matrix), float)
+        return self.shrinkage[0] + self.shrinkage[1]*raw
+
+    def cover_probability(self, edge):
+        from .validated_training import apply_probability
+        return apply_probability(edge, self.probability_calibration)
 
 
 def train_edge_model(
@@ -848,118 +690,19 @@ def train_edge_model(
     validation_cutoff_season: int | None = None,
     random_state: int = 99,
 ) -> tuple[EdgeModelBundle | None, dict[str, Any]]:
-    """Train an edge model that predicts actual_margin - market_spread."""
-    required = {"home_margin", "market_home_margin", "season"}
-    if game_features.empty or not required.issubset(game_features.columns):
-        return None, {"edge_model": "skipped — no market lines in training data"}
+    from .validated_training import train_edge_model as train
 
-    work = game_features.dropna(subset=["home_margin", "market_home_margin", "season"]).copy()
-    work = _build_edge_features(work)
-    work["cover_residual"] = work["home_margin"] - work["market_home_margin"]
-    if len(work) < 200:
-        return None, {"edge_model": "skipped — fewer than 200 games with lines"}
-
-    selection_work = work
-    if validation_cutoff_season is not None:
-        selection_work = work[
-            pd.to_numeric(work["season"], errors="coerce").lt(validation_cutoff_season)
-        ]
-
-    seasons = sorted(selection_work["season"].astype(int).unique())
-    if len(seasons) < 3:
-        return None, {"edge_model": "skipped — fewer than 3 seasons with lines"}
-    folds = seasons[-min(validation_seasons, len(seasons) - 1):]
-
-    best_ats: dict[str, Any] = {}
-    best_params = EDGE_PARAMETER_CANDIDATES[0]
-    best_score = -1.0
-
-    for parameters in EDGE_PARAMETER_CANDIDATES:
-        fold_actuals: list[float] = []
-        fold_predicted: list[float] = []
-        fold_market: list[float] = []
-
-        for val_season in folds:
-            train = selection_work[selection_work["season"].astype(int) < val_season]
-            validate = selection_work[selection_work["season"].astype(int).eq(val_season)]
-            if train.empty or validate.empty:
-                continue
-
-            imputer = SimpleImputer(strategy="median")
-            x_train = imputer.fit_transform(train.reindex(columns=EDGE_FEATURES))
-            x_val = imputer.transform(validate.reindex(columns=EDGE_FEATURES))
-
-            model = XGBRegressor(
-                objective="reg:squarederror",
-                n_estimators=500,
-                n_jobs=-1,
-                random_state=random_state,
-                **parameters,
-            )
-            model.fit(x_train, train["cover_residual"].to_numpy(dtype=float), verbose=False)
-            predicted_edge = model.predict(x_val)
-
-            fold_actuals.extend(validate["home_margin"].to_numpy(dtype=float).tolist())
-            fold_predicted.extend(
-                (validate["market_home_margin"].to_numpy(dtype=float) + predicted_edge).tolist()
-            )
-            fold_market.extend(validate["market_home_margin"].to_numpy(dtype=float).tolist())
-
-        if not fold_actuals:
-            continue
-
-        ats = evaluate_ats(
-            np.array(fold_actuals), np.array(fold_predicted), np.array(fold_market)
-        )
-        # Score by 5pt ATS accuracy — enough games for signal, tight enough for edge.
-        score = ats.get("ats_accuracy_5pt", ats.get("ats_accuracy_3pt", 0.5))
-        if isinstance(score, float) and not np.isnan(score) and score > best_score:
-            best_score = score
-            best_params = parameters
-            best_ats = ats
-
-    # Final training on all data with best params.
-    imputer = SimpleImputer(strategy="median")
-    matrix = imputer.fit_transform(work.reindex(columns=EDGE_FEATURES))
-    final_model = XGBRegressor(
-        objective="reg:squarederror",
-        n_estimators=500,
-        n_jobs=-1,
+    return train(
+        game_features, models_dir,
+        validation_seasons=validation_seasons,
+        validation_cutoff_season=validation_cutoff_season,
         random_state=random_state,
-        **best_params,
     )
-    final_model.fit(matrix, work["cover_residual"].to_numpy(dtype=float), verbose=False)
-    fitted = final_model.predict(matrix)
-    residual_std = float(np.std(work["cover_residual"].to_numpy(dtype=float) - fitted, ddof=1))
-
-    # Feature importance for debugging.
-    importance = pd.DataFrame({
-        "feature": EDGE_FEATURES,
-        "importance": final_model.feature_importances_,
-    }).sort_values("importance", ascending=False)
-    atomic_write_csv(importance, models_dir / "edge_model_feature_importance.csv")
-
-    bundle = EdgeModelBundle(
-        model=final_model,
-        imputer=imputer,
-        features=list(EDGE_FEATURES),
-        residual_std=residual_std,
-    )
-    models_dir.mkdir(parents=True, exist_ok=True)
-    joblib.dump(bundle, models_dir / "edge_xgboost.joblib")
-
-    output = {
-        "edge_model": "trained",
-        "edge_training_games": len(work),
-        "edge_validation_seasons": folds,
-        "edge_best_params": best_params,
-        **{f"edge_{k}": v for k, v in best_ats.items()},
-    }
-    return bundle, output
 
 
 def load_edge_model(models_dir: Path) -> EdgeModelBundle | None:
     path = models_dir / "edge_xgboost.joblib"
     if not path.exists():
         return None
-    return joblib.load(path)
+    bundle = joblib.load(path)
+    return bundle if bundle is not None and bundle.__dict__.get("schema_version") == 6 else None

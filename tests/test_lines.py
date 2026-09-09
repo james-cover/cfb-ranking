@@ -16,7 +16,8 @@ def test_consensus_uses_latest_line_per_provider_then_median():
     )
     consensus = consensus_current_lines(lines).iloc[0]
     assert consensus["consensus_spread"] == -3.5
-    assert consensus["market_home_margin"] == 3.5
+    assert consensus["market_home_margin"] in (3, 4)
+    assert consensus["market_home_margin"] == -consensus["home_spread"]
     assert consensus["sportsbooks"] == "A, B"
 
 

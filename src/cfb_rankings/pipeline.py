@@ -12,17 +12,17 @@ from .features import (
     build_ap_training_frame,
     build_sequential_features,
     current_ap_feature_frame,
+    fbs_team_names,
 )
 from .game_model import (
-    build_season_schedule,
+    apply_edge_predictions,
     build_independent_rankings,
-    _build_edge_features,
+    build_season_schedule,
     load_edge_model,
     load_game_model,
     predict_upcoming_games,
     select_and_train_game_model,
     train_edge_model,
-    EDGE_FEATURES,
 )
 from .logos import BRANDING_COLUMNS, build_team_branding
 from .storage import atomic_write_csv, read_csv, upsert_csv
@@ -69,6 +69,8 @@ def build_features(settings: Settings) -> dict[str, int]:
 def train_models(settings: Settings) -> dict[str, object]:
     ap_training = read_csv(settings.processed_dir / "ap_training_data.csv")
     game_training = read_csv(settings.processed_dir / "game_training_data.csv")
+    if "feature_schema_version" not in game_training or not game_training["feature_schema_version"].eq(6).all():
+        raise ValueError("Pregame features are outdated. Run cfb build-features before cfb train.")
     # Join consensus market lines onto the training data so the validation loop
     # can compute ATS accuracy alongside standard margin metrics.
     raw_lines = read_csv(settings.raw_dir / "betting_lines.csv")
@@ -145,6 +147,8 @@ def generate_predictions(settings: Settings) -> dict[str, int]:
     team_week = read_csv(settings.processed_dir / "team_week_features.csv")
     if team_week.empty:
         raise FileNotFoundError("Processed features are missing; run build-features first")
+    if "feature_schema_version" not in team_week or not team_week["feature_schema_version"].eq(6).all():
+        raise ValueError("Team features are outdated. Run cfb build-features, then cfb train.")
     ap_bundle = load_ap_model(settings.models_dir)
     game_bundle = load_game_model(settings.models_dir)
     current_ap_features, target_week = current_ap_feature_frame(
@@ -153,12 +157,7 @@ def generate_predictions(settings: Settings) -> dict[str, int]:
     predicted_ap = predict_ap_poll(ap_bundle, current_ap_features)
 
     season_current = current_ap_features.drop_duplicates("team")
-    fbs = set(
-        raw["teams"].loc[
-            pd.to_numeric(raw["teams"]["season"], errors="coerce").eq(settings.season),
-            "team",
-        ].dropna().astype(str)
-    )
+    fbs = fbs_team_names(raw["games"], raw["teams"], settings.season)
     independent = build_independent_rankings(game_bundle, season_current, fbs or None)
     all_upcoming = predict_upcoming_games(
         game_bundle,
@@ -168,38 +167,8 @@ def generate_predictions(settings: Settings) -> dict[str, int]:
         settings.season,
         next_slate_only=False,
     )
-    # Apply the edge model to override cover probabilities and spread EV
-    # for games that have market lines. The edge model predicts the cover
-    # residual (actual_margin - market_spread) using team stats + the spread
-    # itself, so its cover_probability captures market-aware edge, not just
-    # raw model disagreement.
     edge_bundle = load_edge_model(settings.models_dir)
-    if edge_bundle is not None and not all_upcoming.empty:
-        has_line = all_upcoming["market_home_margin"].notna()
-        if has_line.any():
-            lined = _build_edge_features(all_upcoming.loc[has_line].copy())
-            edge_matrix = edge_bundle.imputer.transform(
-                lined.reindex(columns=edge_bundle.features)
-            )
-            predicted_edge = edge_bundle.model.predict(edge_matrix)
-            # Predicted edge > 0 means model expects home to cover.
-            scale = max(edge_bundle.residual_std, 1e-6)
-            import math as _math
-            cover_prob = np.array([
-                0.5 * (1.0 + _math.erf(e / (scale * _math.sqrt(2.0)))) for e in predicted_edge
-            ])
-            all_upcoming.loc[has_line, "cover_probability_home"] = cover_prob
-            all_upcoming.loc[has_line, "cover_probability_away"] = 1.0 - cover_prob
-            all_upcoming.loc[has_line, "model_edge_home"] = predicted_edge
-            from .game_model import _moneyline_expected_value
-            all_upcoming.loc[has_line, "home_spread_ev_100"] = _moneyline_expected_value(
-                all_upcoming.loc[has_line, "cover_probability_home"],
-                all_upcoming.loc[has_line, "home_spread_odds"],
-            )
-            all_upcoming.loc[has_line, "away_spread_ev_100"] = _moneyline_expected_value(
-                all_upcoming.loc[has_line, "cover_probability_away"],
-                all_upcoming.loc[has_line, "away_spread_odds"],
-            )
+    all_upcoming = apply_edge_predictions(all_upcoming, edge_bundle)
     # Attach broadcast outlet to upcoming games and season schedule.
     tv_lookup = _tv_outlet_lookup(raw.get("media", pd.DataFrame()))
     if not tv_lookup.empty and not all_upcoming.empty:
