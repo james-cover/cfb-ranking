@@ -46,6 +46,14 @@ MODEL_FEATURE_BASELINES = {
     "first_downs_pg_allowed": 20.0,
     "penalty_yards_pg": 50.0,
     "possession_time_pg": 30.0,
+    # Pregame opponent-adjusted residuals. Positive values always mean better
+    # than the opponent's established expectation.
+    "opp_adj_points_off": 0.0,
+    "opp_adj_points_def": 0.0,
+    "opp_adj_rushing_off": 0.0,
+    "opp_adj_rushing_def": 0.0,
+    "opp_adj_passing_off": 0.0,
+    "opp_adj_passing_def": 0.0,
 }
 
 
@@ -159,6 +167,12 @@ class TeamState:
     penalty_yards_against_sum: float = 0.0
     possession_time_sum: float = 0.0
     box_games: int = 0  # games with detailed box score data
+    opp_adj_points_off_sum: float = 0.0
+    opp_adj_points_def_sum: float = 0.0
+    opp_adj_rushing_off_sum: float = 0.0
+    opp_adj_rushing_def_sum: float = 0.0
+    opp_adj_passing_off_sum: float = 0.0
+    opp_adj_passing_def_sum: float = 0.0
     offense_ppa_sum: float = 0.0
     defense_ppa_sum: float = 0.0
     offense_success_rate_sum: float = 0.0
@@ -226,6 +240,12 @@ class TeamState:
             "first_downs_pg_allowed": self.first_downs_against_sum / box_games if self.box_games else 0.0,
             "penalty_yards_pg": self.penalty_yards_for_sum / box_games if self.box_games else 0.0,
             "possession_time_pg": self.possession_time_sum / box_games if self.box_games else 30.0,
+            "opp_adj_points_off": self.opp_adj_points_off_sum / games if self.games else 0.0,
+            "opp_adj_points_def": self.opp_adj_points_def_sum / games if self.games else 0.0,
+            "opp_adj_rushing_off": self.opp_adj_rushing_off_sum / box_games if self.box_games else 0.0,
+            "opp_adj_rushing_def": self.opp_adj_rushing_def_sum / box_games if self.box_games else 0.0,
+            "opp_adj_passing_off": self.opp_adj_passing_off_sum / box_games if self.box_games else 0.0,
+            "opp_adj_passing_def": self.opp_adj_passing_def_sum / box_games if self.box_games else 0.0,
             "offense_ppa": self.offense_ppa_sum / advanced_games if self.advanced_games else 0.0,
             "defense_ppa": self.defense_ppa_sum / advanced_games if self.advanced_games else 0.0,
             "offense_success_rate": (
@@ -296,6 +316,12 @@ TEAM_NUMERIC_FEATURES = [
     "first_downs_pg_allowed",
     "penalty_yards_pg",
     "possession_time_pg",
+    "opp_adj_points_off",
+    "opp_adj_points_def",
+    "opp_adj_rushing_off",
+    "opp_adj_rushing_def",
+    "opp_adj_passing_off",
+    "opp_adj_passing_def",
 ]
 
 MATCHUP_FEATURES = [
@@ -338,6 +364,12 @@ MATCHUP_FEATURES = [
     "first_downs_pg_allowed_diff",
     "penalty_yards_pg_diff",
     "possession_time_pg_diff",
+    "opp_adj_points_off_diff",
+    "opp_adj_points_def_diff",
+    "opp_adj_rushing_off_diff",
+    "opp_adj_rushing_def_diff",
+    "opp_adj_passing_off_diff",
+    "opp_adj_passing_def_diff",
     "neutral_site",
     "home_field",
     "season_progress",
@@ -491,7 +523,8 @@ def model_adjusted_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                          "yards_per_rush", "yards_per_rush_allowed", "yards_per_pass",
                          "yards_per_pass_allowed", "third_down_pct", "third_down_pct_allowed",
                          "first_downs_pg", "first_downs_pg_allowed", "penalty_yards_pg",
-                         "possession_time_pg"}:
+                         "possession_time_pg", "opp_adj_rushing_off", "opp_adj_rushing_def",
+                         "opp_adj_passing_off", "opp_adj_passing_def"}:
             count = float(adjusted.get("box_games", 0))
         reliability = max(count, 0) / (max(count, 0) + EARLY_SEASON_PRIOR_GAMES)
         value = float(adjusted.get(feature, baseline))
@@ -619,6 +652,8 @@ def build_sequential_features(
                 away = states.setdefault(str(game.away_team), TeamState(str(game.away_team)))
                 home_pre = home.snapshot()
                 away_pre = away.snapshot()
+                home_expected = model_adjusted_snapshot(home_pre)
+                away_expected = model_adjusted_snapshot(away_pre)
                 neutral = bool(game.neutral_site)
                 progress = min(max(int(week), 0) / 15.0, 1.0)
                 matchup = _matchup_row(home, away, neutral, progress)
@@ -660,6 +695,21 @@ def build_sequential_features(
                 away.points_against += float(game.home_points)
                 home.margin_sum += home_margin
                 away.margin_sum -= home_margin
+                # Compare this game's scoring with what the specific opponent
+                # was expected to score/allow before kickoff. No current-game
+                # or future information enters these residuals.
+                home.opp_adj_points_off_sum += (
+                    float(game.home_points) - float(away_expected["points_allowed_per_game"])
+                )
+                home.opp_adj_points_def_sum += (
+                    float(away_expected["points_per_game"]) - float(game.away_points)
+                )
+                away.opp_adj_points_off_sum += (
+                    float(game.away_points) - float(home_expected["points_allowed_per_game"])
+                )
+                away.opp_adj_points_def_sum += (
+                    float(home_expected["points_per_game"]) - float(game.home_points)
+                )
                 home.opponent_elo_sum += away_elo_before
                 away.opponent_elo_sum += home_elo_before
                 capped_margin = float(np.clip(home_margin, -35.0, 35.0))
@@ -762,6 +812,14 @@ def build_sequential_features(
                     home.passing_yards_against_sum += a_pass
                     away.passing_yards_for_sum += a_pass
                     away.passing_yards_against_sum += h_pass
+                    home.opp_adj_rushing_off_sum += h_rush - float(away_expected["rushing_ypg_allowed"])
+                    home.opp_adj_rushing_def_sum += float(away_expected["rushing_ypg"]) - a_rush
+                    home.opp_adj_passing_off_sum += h_pass - float(away_expected["passing_ypg_allowed"])
+                    home.opp_adj_passing_def_sum += float(away_expected["passing_ypg"]) - a_pass
+                    away.opp_adj_rushing_off_sum += a_rush - float(home_expected["rushing_ypg_allowed"])
+                    away.opp_adj_rushing_def_sum += float(home_expected["rushing_ypg"]) - h_rush
+                    away.opp_adj_passing_off_sum += a_pass - float(home_expected["passing_ypg_allowed"])
+                    away.opp_adj_passing_def_sum += float(home_expected["passing_ypg"]) - h_pass
                     if h_ypr is not None and a_ypr is not None:
                         home.yards_per_rush_sum += h_ypr
                         home.yards_per_rush_against_sum += a_ypr
@@ -881,8 +939,8 @@ def build_sequential_features(
     if not game_features.empty:
         game_features = game_features[game_features["model_eligible"]].reset_index(drop=True)
     team_week_features = pd.DataFrame(weekly_rows)
-    game_features["feature_schema_version"] = 7
-    team_week_features["feature_schema_version"] = 7
+    game_features["feature_schema_version"] = 8
+    team_week_features["feature_schema_version"] = 8
     return game_features, team_week_features
 
 

@@ -27,7 +27,7 @@ class GameModelBundle:
     residual_q90: float
     selected_parameters: dict[str, Any]
     probability_calibration: tuple[float, float] = (0.0, 0.0)
-    schema_version: int = 7
+    schema_version: int = 8
     scaler: Any | None = None
     model_family: str = "xgboost"
 
@@ -82,12 +82,12 @@ def select_and_train_game_model(
 
 
 def load_game_model(models_dir: Path) -> GameModelBundle:
-    path = models_dir / "independent_bayesian.joblib"
+    path = models_dir / "independent_model.joblib"
     if not path.exists():
-        raise FileNotFoundError("Independent Bayesian model has not been trained yet")
+        raise FileNotFoundError("Opponent-adjusted independent model has not been trained yet")
     bundle = joblib.load(path)
-    if bundle.__dict__.get("schema_version") != 7:
-        raise ValueError("Independent model is not Bayesian v0.7. Run cfb build-features and cfb train.")
+    if bundle.__dict__.get("schema_version") != 8:
+        raise ValueError("Independent model is not opponent-adjusted v0.8. Run cfb build-features and cfb train.")
     return bundle
 
 
@@ -142,6 +142,12 @@ CONTRIBUTION_GROUPS["efficiency_contribution"].update({
         "yards_per_rush", "yards_per_rush_allowed", "yards_per_pass", "yards_per_pass_allowed",
         "third_down_pct", "third_down_pct_allowed", "first_downs_pg", "first_downs_pg_allowed",
         "penalty_yards_pg", "possession_time_pg",
+    )
+})
+CONTRIBUTION_GROUPS["sos_contribution"].update({
+    f"opp_adj_{name}_diff" for name in (
+        "points_off", "points_def", "rushing_off", "rushing_def",
+        "passing_off", "passing_def",
     )
 })
 

@@ -4,7 +4,7 @@ A live, CSV-backed system that produces:
 
 1. The current official AP Top 25.
 2. A machine-learning forecast of the next AP Top 25.
-3. An independent Bayesian ranking of FBS teams.
+3. An opponent-adjusted independent ranking of FBS teams.
 4. Predicted margins and scores for upcoming games, compared with current consensus spreads.
 5. Locally cached team logos and official team colors for the included HTML frontend.
 6. Full-season team schedules, selectable spread and moneyline props, model EV, and a local bet-slip calculator.
@@ -54,17 +54,16 @@ dashboard exposes them rather than silently hard-coding a favored algorithm.
 
 ### Independent ranking and game forecast
 
-The independent model is Bayesian ridge regression trained to predict the home team's final
-scoring margin from pregame information. Candidate basic-stat feature sets are selected using
-complete future seasons as validation sets, with a simpler model preferred when validation MAE
-is within 0.05 points.
+Bayesian Ridge and XGBoost are trained to predict the home team's final scoring margin from the
+same opponent-adjusted inputs. Complete future seasons select the winner; Bayesian Ridge is
+preferred only when its validation MAE is within 0.05 points of the best result.
 
-The independent model deliberately uses readable inputs: points scored and allowed, rushing
-yards gained and allowed, passing yards gained and allowed, turnover margin, average time of
-possession, Elo strength of schedule, and home field. A second candidate may also include team
-Elo; season-forward validation decides whether it earns its place. The sportsbook line is never
-an input. The separate betting-edge model remains XGBoost and is not shown as validated unless
-its held-out evidence clears the safety thresholds.
+For every completed game, scoring, rushing, passing, and defensive production are recorded as
+residuals against that specific opponent's pregame offense or defense. Positive values mean the
+team performed better than the opponent normally permits or produces. Inputs also include
+turnover margin, possession time, Elo strength of schedule, home field, and optionally team Elo.
+The sportsbook line is never an input. The separate betting-edge model remains XGBoost and is
+not shown as validated unless its held-out evidence clears the safety thresholds.
 
 To rank teams, the trained model predicts every FBS-versus-FBS matchup on a neutral field. A
 team's independent rating is its average predicted margin across those opponents. This makes
@@ -74,7 +73,7 @@ Early-season rate statistics use a four-game neutral prior before entering the m
 record and displayed statistics remain unchanged, but one blowout cannot masquerade as a
 stable full-season average. Elo persists only for teams that were FBS in the prior season;
 new FBS members do not inherit a lower-division rating. Independent-ranking exports include
-linear contribution groups so each team's detail page shows what raised or lowered its rank.
+feature-contribution groups so each team's detail page shows what raised or lowered its rank.
 
 ## Leakage policy
 

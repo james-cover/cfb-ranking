@@ -110,10 +110,15 @@ def test_current_cfbd_box_scores_join_and_enter_next_games_features():
         sample_games(), sample_rankings(), team_game_stats=stats
     )
     assert game_features["box_score_available"].all()
+    first = game_features.iloc[0]
     second = game_features.iloc[1]
+    assert first["opp_adj_passing_off_diff"] == 0
+    assert first["opp_adj_rushing_off_diff"] == 0
     assert second["rushing_ypg_diff"] != 0
     assert second["passing_ypg_diff"] != 0
     assert second["possession_time_pg_diff"] != 0
+    assert second["opp_adj_passing_off_diff"] != 0
+    assert second["opp_adj_rushing_off_diff"] != 0
 
 
 def test_lower_division_elo_does_not_carry_into_a_new_season():
