@@ -95,6 +95,7 @@ def build_features(settings: Settings) -> dict[str, int]:
     simple_columns = [
         "rushing_ypg_diff", "passing_ypg_diff", "possession_time_pg_diff",
         "opp_adj_rushing_off_diff", "opp_adj_passing_off_diff",
+        "bayes_rushing_off_rating_diff", "bayes_passing_off_rating_diff",
     ]
     unusable = [
         name for name in simple_columns
@@ -103,7 +104,7 @@ def build_features(settings: Settings) -> dict[str, int]:
     if unusable:
         raise ValueError(
             "Box scores were downloaded but did not join to games; these model features "
-            f"are constant: {', '.join(unusable)}. Re-run cfb build-features with v0.8.0."
+            f"are constant: {', '.join(unusable)}. Re-run cfb build-features with v0.9.0."
         )
     ap_training = build_ap_training_frame(
         team_week_features, raw["rankings"], raw["teams"]
@@ -125,7 +126,7 @@ def build_features(settings: Settings) -> dict[str, int]:
 def train_models(settings: Settings) -> dict[str, object]:
     ap_training = read_csv(settings.processed_dir / "ap_training_data.csv")
     game_training = read_csv(settings.processed_dir / "game_training_data.csv")
-    if "feature_schema_version" not in game_training or not game_training["feature_schema_version"].eq(8).all():
+    if "feature_schema_version" not in game_training or not game_training["feature_schema_version"].eq(9).all():
         raise ValueError("Pregame features are outdated. Run cfb build-features before cfb train.")
     # Join consensus market lines onto the training data so the validation loop
     # can compute ATS accuracy alongside standard margin metrics.
@@ -206,7 +207,7 @@ def generate_predictions(settings: Settings) -> dict[str, int]:
     team_week = read_csv(settings.processed_dir / "team_week_features.csv")
     if team_week.empty:
         raise FileNotFoundError("Processed features are missing; run build-features first")
-    if "feature_schema_version" not in team_week or not team_week["feature_schema_version"].eq(8).all():
+    if "feature_schema_version" not in team_week or not team_week["feature_schema_version"].eq(9).all():
         raise ValueError("Team features are outdated. Run cfb build-features, then cfb train.")
     ap_bundle = load_ap_model(settings.models_dir)
     game_bundle = load_game_model(settings.models_dir)

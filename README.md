@@ -58,9 +58,11 @@ Bayesian Ridge and XGBoost are trained to predict the home team's final scoring 
 same opponent-adjusted inputs. Complete future seasons select the winner; Bayesian Ridge is
 preferred only when its validation MAE is within 0.05 points of the best result.
 
-For every completed game, scoring, rushing, passing, and defensive production are recorded as
-residuals against that specific opponent's pregame offense or defense. Positive values mean the
-team performed better than the opponent normally permits or produces. Inputs also include
+For every completed game, separate partially pooled Bayesian offense and defense ratings create
+pregame expectations for scoring, rushing, and passing. Observations update both the team's
+offense and its opponent's defense according to their current uncertainty. The model retains both
+the latent ratings and actual-minus-expected residuals. Positive residuals mean the team performed
+better than the matchup model expected. Inputs also include
 turnover margin, possession time, Elo strength of schedule, home field, and optionally team Elo.
 The sportsbook line is never an input. The separate betting-edge model remains XGBoost and is
 not shown as validated unless its held-out evidence clears the safety thresholds.

@@ -129,6 +129,88 @@ def _find_stat(stats: dict[str, Any], aliases: tuple[str, ...]) -> float | None:
 
 
 @dataclass
+class BayesianStatExpectation:
+    """Online offense/defense model used to form genuine pregame expectations.
+
+    The observation model is ``stat = baseline + offense - opponent_defense + error``.
+    Team effects are partially pooled through Normal priors and updated only after
+    the game's expectation and residual have been recorded.
+    """
+
+    baseline: float
+    observation_sd: float
+    prior_sd: float
+    elo_scale: float
+    carryover: float = 0.65
+    offense: dict[str, float] = field(default_factory=dict)
+    defense: dict[str, float] = field(default_factory=dict)
+    offense_var: dict[str, float] = field(default_factory=dict)
+    defense_var: dict[str, float] = field(default_factory=dict)
+
+    def add_team(
+        self,
+        team: str,
+        elo: float = 1500.0,
+        prior: tuple[float, float] | None = None,
+    ) -> None:
+        if team in self.offense:
+            return
+        elo_prior = self.elo_scale * (float(elo) - 1500.0)
+        prior_offense = elo_prior / 2.0
+        prior_defense = elo_prior / 2.0
+        if prior is not None:
+            prior_offense = self.carryover * prior[0] + (1.0 - self.carryover) * prior_offense
+            prior_defense = self.carryover * prior[1] + (1.0 - self.carryover) * prior_defense
+        self.offense[team] = float(prior_offense)
+        self.defense[team] = float(prior_defense)
+        variance = self.prior_sd**2
+        self.offense_var[team] = variance
+        self.defense_var[team] = variance
+
+    def predict(self, team: str, opponent: str) -> float:
+        self.add_team(team)
+        self.add_team(opponent)
+        return self.baseline + self.offense[team] - self.defense[opponent]
+
+    def update(self, team: str, opponent: str, actual: float) -> float:
+        predicted = self.predict(team, opponent)
+        residual = float(actual) - predicted
+        variance = (
+            self.observation_sd**2
+            + self.offense_var[team]
+            + self.defense_var[opponent]
+        )
+        offense_gain = self.offense_var[team] / variance
+        defense_gain = self.defense_var[opponent] / variance
+        self.offense[team] += offense_gain * residual
+        self.defense[opponent] -= defense_gain * residual
+        self.offense_var[team] *= 1.0 - offense_gain
+        self.defense_var[opponent] *= 1.0 - defense_gain
+        return residual
+
+    def profiles(self, teams: set[str]) -> dict[str, tuple[float, float]]:
+        return {
+            team: (self.offense[team], self.defense[team])
+            for team in teams
+            if team in self.offense and team in self.defense
+        }
+
+
+def _sync_expectation_ratings(
+    states: dict[str, TeamState],
+    models: dict[str, BayesianStatExpectation],
+    teams: set[str] | list[str] | tuple[str, ...],
+) -> None:
+    for team in teams:
+        if team not in states:
+            continue
+        state = states[team]
+        for metric, model in models.items():
+            model.add_team(team, state.elo)
+            setattr(state, f"bayes_{metric}_off_rating", model.offense[team])
+            setattr(state, f"bayes_{metric}_def_rating", model.defense[team])
+
+@dataclass
 class TeamState:
     team: str
     elo: float = 1500.0
@@ -173,6 +255,12 @@ class TeamState:
     opp_adj_rushing_def_sum: float = 0.0
     opp_adj_passing_off_sum: float = 0.0
     opp_adj_passing_def_sum: float = 0.0
+    bayes_points_off_rating: float = 0.0
+    bayes_points_def_rating: float = 0.0
+    bayes_rushing_off_rating: float = 0.0
+    bayes_rushing_def_rating: float = 0.0
+    bayes_passing_off_rating: float = 0.0
+    bayes_passing_def_rating: float = 0.0
     offense_ppa_sum: float = 0.0
     defense_ppa_sum: float = 0.0
     offense_success_rate_sum: float = 0.0
@@ -246,6 +334,12 @@ class TeamState:
             "opp_adj_rushing_def": self.opp_adj_rushing_def_sum / box_games if self.box_games else 0.0,
             "opp_adj_passing_off": self.opp_adj_passing_off_sum / box_games if self.box_games else 0.0,
             "opp_adj_passing_def": self.opp_adj_passing_def_sum / box_games if self.box_games else 0.0,
+            "bayes_points_off_rating": self.bayes_points_off_rating,
+            "bayes_points_def_rating": self.bayes_points_def_rating,
+            "bayes_rushing_off_rating": self.bayes_rushing_off_rating,
+            "bayes_rushing_def_rating": self.bayes_rushing_def_rating,
+            "bayes_passing_off_rating": self.bayes_passing_off_rating,
+            "bayes_passing_def_rating": self.bayes_passing_def_rating,
             "offense_ppa": self.offense_ppa_sum / advanced_games if self.advanced_games else 0.0,
             "defense_ppa": self.defense_ppa_sum / advanced_games if self.advanced_games else 0.0,
             "offense_success_rate": (
@@ -322,6 +416,12 @@ TEAM_NUMERIC_FEATURES = [
     "opp_adj_rushing_def",
     "opp_adj_passing_off",
     "opp_adj_passing_def",
+    "bayes_points_off_rating",
+    "bayes_points_def_rating",
+    "bayes_rushing_off_rating",
+    "bayes_rushing_def_rating",
+    "bayes_passing_off_rating",
+    "bayes_passing_def_rating",
 ]
 
 MATCHUP_FEATURES = [
@@ -370,6 +470,12 @@ MATCHUP_FEATURES = [
     "opp_adj_rushing_def_diff",
     "opp_adj_passing_off_diff",
     "opp_adj_passing_def_diff",
+    "bayes_points_off_rating_diff",
+    "bayes_points_def_rating_diff",
+    "bayes_rushing_off_rating_diff",
+    "bayes_rushing_def_rating_diff",
+    "bayes_passing_off_rating_diff",
+    "bayes_passing_def_rating_diff",
     "neutral_site",
     "home_field",
     "season_progress",
@@ -617,6 +723,9 @@ def build_sequential_features(
     weekly_rows: list[dict[str, Any]] = []
     previous_season_elos: dict[str, float] = {}
     previous_profiles: dict[str, dict[str, float]] = {}
+    previous_expectations: dict[str, dict[str, tuple[float, float]]] = {
+        "points": {}, "rushing": {}, "passing": {},
+    }
 
     for season, season_games in work.groupby("season", sort=True):
         known_teams: set[str] = set()
@@ -643,6 +752,19 @@ def build_sequential_features(
             )
             for team in known_teams
         }
+        expectation_models = {
+            "points": BayesianStatExpectation(27.0, 14.0, 8.0, 0.035),
+            "rushing": BayesianStatExpectation(160.0, 70.0, 40.0, 0.15),
+            "passing": BayesianStatExpectation(215.0, 95.0, 55.0, 0.25),
+        }
+        for metric, expectation_model in expectation_models.items():
+            for team in known_teams:
+                expectation_model.add_team(
+                    team,
+                    states[team].elo,
+                    previous_expectations[metric].get(team) if team in season_fbs else None,
+                )
+        _sync_expectation_ratings(states, expectation_models, known_teams)
 
         group_columns = ["season_type_order", "season_type", "week"]
         for (_, season_type, week), week_games in season_games.groupby(group_columns, sort=True):
@@ -652,8 +774,24 @@ def build_sequential_features(
                 away = states.setdefault(str(game.away_team), TeamState(str(game.away_team)))
                 home_pre = home.snapshot()
                 away_pre = away.snapshot()
-                home_expected = model_adjusted_snapshot(home_pre)
-                away_expected = model_adjusted_snapshot(away_pre)
+                expected_home_points = expectation_models["points"].predict(
+                    str(game.home_team), str(game.away_team)
+                )
+                expected_away_points = expectation_models["points"].predict(
+                    str(game.away_team), str(game.home_team)
+                )
+                expected_home_rushing = expectation_models["rushing"].predict(
+                    str(game.home_team), str(game.away_team)
+                )
+                expected_away_rushing = expectation_models["rushing"].predict(
+                    str(game.away_team), str(game.home_team)
+                )
+                expected_home_passing = expectation_models["passing"].predict(
+                    str(game.home_team), str(game.away_team)
+                )
+                expected_away_passing = expectation_models["passing"].predict(
+                    str(game.away_team), str(game.home_team)
+                )
                 neutral = bool(game.neutral_site)
                 progress = min(max(int(week), 0) / 15.0, 1.0)
                 matchup = _matchup_row(home, away, neutral, progress)
@@ -679,6 +817,12 @@ def build_sequential_features(
                         "home_margin": home_margin,
                         "game_total": float(game.home_points) + float(game.away_points),
                         "box_score_available": box_score_available,
+                        "expected_home_points": expected_home_points,
+                        "expected_away_points": expected_away_points,
+                        "expected_home_rushing_yards": expected_home_rushing,
+                        "expected_away_rushing_yards": expected_away_rushing,
+                        "expected_home_passing_yards": expected_home_passing,
+                        "expected_away_passing_yards": expected_away_passing,
                     }
                 )
 
@@ -695,20 +839,19 @@ def build_sequential_features(
                 away.points_against += float(game.home_points)
                 home.margin_sum += home_margin
                 away.margin_sum -= home_margin
-                # Compare this game's scoring with what the specific opponent
-                # was expected to score/allow before kickoff. No current-game
-                # or future information enters these residuals.
-                home.opp_adj_points_off_sum += (
-                    float(game.home_points) - float(away_expected["points_allowed_per_game"])
+                # Actual-minus-expected residuals from a partially pooled
+                # offense/defense model, not the opponent's raw average.
+                home_points_residual = float(game.home_points) - expected_home_points
+                away_points_residual = float(game.away_points) - expected_away_points
+                home.opp_adj_points_off_sum += home_points_residual
+                home.opp_adj_points_def_sum -= away_points_residual
+                away.opp_adj_points_off_sum += away_points_residual
+                away.opp_adj_points_def_sum -= home_points_residual
+                expectation_models["points"].update(
+                    str(game.home_team), str(game.away_team), float(game.home_points)
                 )
-                home.opp_adj_points_def_sum += (
-                    float(away_expected["points_per_game"]) - float(game.away_points)
-                )
-                away.opp_adj_points_off_sum += (
-                    float(game.away_points) - float(home_expected["points_allowed_per_game"])
-                )
-                away.opp_adj_points_def_sum += (
-                    float(home_expected["points_per_game"]) - float(game.home_points)
+                expectation_models["points"].update(
+                    str(game.away_team), str(game.home_team), float(game.away_points)
                 )
                 home.opponent_elo_sum += away_elo_before
                 away.opponent_elo_sum += home_elo_before
@@ -812,14 +955,30 @@ def build_sequential_features(
                     home.passing_yards_against_sum += a_pass
                     away.passing_yards_for_sum += a_pass
                     away.passing_yards_against_sum += h_pass
-                    home.opp_adj_rushing_off_sum += h_rush - float(away_expected["rushing_ypg_allowed"])
-                    home.opp_adj_rushing_def_sum += float(away_expected["rushing_ypg"]) - a_rush
-                    home.opp_adj_passing_off_sum += h_pass - float(away_expected["passing_ypg_allowed"])
-                    home.opp_adj_passing_def_sum += float(away_expected["passing_ypg"]) - a_pass
-                    away.opp_adj_rushing_off_sum += a_rush - float(home_expected["rushing_ypg_allowed"])
-                    away.opp_adj_rushing_def_sum += float(home_expected["rushing_ypg"]) - h_rush
-                    away.opp_adj_passing_off_sum += a_pass - float(home_expected["passing_ypg_allowed"])
-                    away.opp_adj_passing_def_sum += float(home_expected["passing_ypg"]) - h_pass
+                    home_rushing_residual = h_rush - expected_home_rushing
+                    away_rushing_residual = a_rush - expected_away_rushing
+                    home_passing_residual = h_pass - expected_home_passing
+                    away_passing_residual = a_pass - expected_away_passing
+                    home.opp_adj_rushing_off_sum += home_rushing_residual
+                    home.opp_adj_rushing_def_sum -= away_rushing_residual
+                    away.opp_adj_rushing_off_sum += away_rushing_residual
+                    away.opp_adj_rushing_def_sum -= home_rushing_residual
+                    home.opp_adj_passing_off_sum += home_passing_residual
+                    home.opp_adj_passing_def_sum -= away_passing_residual
+                    away.opp_adj_passing_off_sum += away_passing_residual
+                    away.opp_adj_passing_def_sum -= home_passing_residual
+                    expectation_models["rushing"].update(
+                        str(game.home_team), str(game.away_team), h_rush
+                    )
+                    expectation_models["rushing"].update(
+                        str(game.away_team), str(game.home_team), a_rush
+                    )
+                    expectation_models["passing"].update(
+                        str(game.home_team), str(game.away_team), h_pass
+                    )
+                    expectation_models["passing"].update(
+                        str(game.away_team), str(game.home_team), a_pass
+                    )
                     if h_ypr is not None and a_ypr is not None:
                         home.yards_per_rush_sum += h_ypr
                         home.yards_per_rush_against_sum += a_ypr
@@ -846,6 +1005,12 @@ def build_sequential_features(
                     if h_poss is not None:
                         home.possession_time_sum += h_poss
                         away.possession_time_sum += 60.0 - h_poss
+
+                _sync_expectation_ratings(
+                    states,
+                    expectation_models,
+                    (str(game.home_team), str(game.away_team)),
+                )
 
                 home_advanced = advanced_lookup.get((game.game_id, str(game.home_team)), {})
                 away_advanced = advanced_lookup.get((game.game_id, str(game.away_team)), {})
@@ -934,13 +1099,17 @@ def build_sequential_features(
                 previous_profiles[team] = {
                     key: profile[key] for key in MODEL_FEATURE_BASELINES
                 }
+        previous_expectations = {
+            metric: model.profiles(season_fbs)
+            for metric, model in expectation_models.items()
+        }
 
     game_features = pd.DataFrame(game_rows)
     if not game_features.empty:
         game_features = game_features[game_features["model_eligible"]].reset_index(drop=True)
     team_week_features = pd.DataFrame(weekly_rows)
-    game_features["feature_schema_version"] = 8
-    team_week_features["feature_schema_version"] = 8
+    game_features["feature_schema_version"] = 9
+    team_week_features["feature_schema_version"] = 9
     return game_features, team_week_features
 
 

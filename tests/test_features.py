@@ -2,7 +2,11 @@ import json
 
 import pandas as pd
 
-from cfb_rankings.features import build_ap_training_frame, build_sequential_features
+from cfb_rankings.features import (
+    BayesianStatExpectation,
+    build_ap_training_frame,
+    build_sequential_features,
+)
 
 
 def sample_games():
@@ -114,11 +118,28 @@ def test_current_cfbd_box_scores_join_and_enter_next_games_features():
     second = game_features.iloc[1]
     assert first["opp_adj_passing_off_diff"] == 0
     assert first["opp_adj_rushing_off_diff"] == 0
+    assert first["bayes_passing_off_rating_diff"] == 0
+    assert first["expected_home_passing_yards"] == 215
     assert second["rushing_ypg_diff"] != 0
     assert second["passing_ypg_diff"] != 0
     assert second["possession_time_pg_diff"] != 0
     assert second["opp_adj_passing_off_diff"] != 0
     assert second["opp_adj_rushing_off_diff"] != 0
+    assert second["bayes_passing_off_rating_diff"] != 0
+    assert second["bayes_rushing_def_rating_diff"] != 0
+    assert second["expected_home_passing_yards"] != 215
+
+
+def test_bayesian_expectation_separates_offense_from_opponent_defense():
+    model = BayesianStatExpectation(
+        baseline=215.0, observation_sd=20.0, prior_sd=100.0, elo_scale=0.0
+    )
+    model.update("Average A", "Strong Defense", 50.0)
+    model.update("Average B", "Weak Defense", 500.0)
+    expected_vs_strong = model.predict("Test Offense", "Strong Defense")
+    expected_vs_weak = model.predict("Test Offense", "Weak Defense")
+    assert expected_vs_strong < expected_vs_weak
+    assert 300.0 - expected_vs_strong > 500.0 - expected_vs_weak
 
 
 def test_lower_division_elo_does_not_carry_into_a_new_season():

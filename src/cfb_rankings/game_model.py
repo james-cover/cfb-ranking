@@ -27,7 +27,7 @@ class GameModelBundle:
     residual_q90: float
     selected_parameters: dict[str, Any]
     probability_calibration: tuple[float, float] = (0.0, 0.0)
-    schema_version: int = 8
+    schema_version: int = 9
     scaler: Any | None = None
     model_family: str = "xgboost"
 
@@ -86,8 +86,8 @@ def load_game_model(models_dir: Path) -> GameModelBundle:
     if not path.exists():
         raise FileNotFoundError("Opponent-adjusted independent model has not been trained yet")
     bundle = joblib.load(path)
-    if bundle.__dict__.get("schema_version") != 8:
-        raise ValueError("Independent model is not opponent-adjusted v0.8. Run cfb build-features and cfb train.")
+    if bundle.__dict__.get("schema_version") != 9:
+        raise ValueError("Independent model is not expectation-based v0.9. Run cfb build-features and cfb train.")
     return bundle
 
 
@@ -146,6 +146,12 @@ CONTRIBUTION_GROUPS["efficiency_contribution"].update({
 })
 CONTRIBUTION_GROUPS["sos_contribution"].update({
     f"opp_adj_{name}_diff" for name in (
+        "points_off", "points_def", "rushing_off", "rushing_def",
+        "passing_off", "passing_def",
+    )
+})
+CONTRIBUTION_GROUPS["power_contribution"].update({
+    f"bayes_{name}_rating_diff" for name in (
         "points_off", "points_def", "rushing_off", "rushing_def",
         "passing_off", "passing_def",
     )

@@ -17,6 +17,9 @@ from .storage import atomic_write_csv
 from .validated_training import apply_probability, fit_probability, probability_scores
 
 OPPONENT_ADJUSTED_FEATURES = [
+    "bayes_points_off_rating_diff", "bayes_points_def_rating_diff",
+    "bayes_rushing_off_rating_diff", "bayes_rushing_def_rating_diff",
+    "bayes_passing_off_rating_diff", "bayes_passing_def_rating_diff",
     "opp_adj_points_off_diff", "opp_adj_points_def_diff",
     "opp_adj_rushing_off_diff", "opp_adj_rushing_def_diff",
     "opp_adj_passing_off_diff", "opp_adj_passing_def_diff",
@@ -72,8 +75,8 @@ def select_and_train_bayesian_model(
         (family, label, features)
         for family in ("bayesian_ridge", "xgboost")
         for label, features in (
-            ("opponent_adjusted", OPPONENT_ADJUSTED_FEATURES),
-            ("opponent_adjusted_elo", ["elo_diff", *OPPONENT_ADJUSTED_FEATURES]),
+            ("bayesian_expectation_residuals", OPPONENT_ADJUSTED_FEATURES),
+            ("bayesian_expectation_residuals_elo", ["elo_diff", *OPPONENT_ADJUSTED_FEATURES]),
         )
     ]
 
@@ -99,11 +102,15 @@ def select_and_train_bayesian_model(
 
     summary = pd.DataFrame(summaries).sort_values(["mae", "feature_count", "candidate"])
     best_mae = float(summary.iloc[0].mae)
-    eligible = summary[summary.mae <= best_mae + 0.05].copy()
-    eligible["family_preference"] = eligible.family.ne("bayesian_ridge").astype(int)
-    selected = int(eligible.sort_values(
-        ["family_preference", "feature_count", "mae"]
-    ).iloc[0].candidate)
+    bayesian_near_best = summary[
+        summary.family.eq("bayesian_ridge") & summary.mae.le(best_mae + 0.05)
+    ]
+    winner = (
+        bayesian_near_best.sort_values("mae").iloc[0]
+        if not bayesian_near_best.empty
+        else summary.iloc[0]
+    )
+    selected = int(winner.candidate)
     family, label, selected_features = candidates[selected]
 
     calibration = history[history.season == calibration_year]
@@ -143,7 +150,7 @@ def select_and_train_bayesian_model(
         float(residuals.mean()), float(residuals.std(ddof=1)),
         float(np.quantile(residuals, 0.1)), float(np.quantile(residuals, 0.9)),
         {"family": family, "feature_set": label, "selection_tolerance_mae": 0.05},
-        probability_calibration=probability_fit, schema_version=8,
+        probability_calibration=probability_fit, schema_version=9,
         scaler=scaler, model_family=family,
     )
     models_dir.mkdir(parents=True, exist_ok=True)
@@ -172,7 +179,7 @@ def select_and_train_bayesian_model(
     coefficients = coefficients.sort_values("importance", ascending=False)
     atomic_write_csv(coefficients, models_dir / "game_model_feature_importance.csv")
     (models_dir / "game_model_metadata.json").write_text(json.dumps({
-        "schema_version": 8, "family": family, "model": label, "features": features,
+        "schema_version": 9, "family": family, "model": label, "features": features,
         "selection_seasons": [int(year) for year in folds],
         "calibration_season": int(calibration_year), "test_season": int(test_year),
         "selection_tolerance_mae": 0.05,
