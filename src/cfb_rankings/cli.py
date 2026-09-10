@@ -42,7 +42,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands.add_parser("audit", help="Write and display the CSV data-quality audit")
     commands.add_parser("build-features", help="Create leakage-safe model features")
-    commands.add_parser("train", help="Select and train both model families")
+    train = commands.add_parser("train", help="Select and train model families using season-forward validation")
+    train.add_argument("--tune", action="store_true", help="Run the expanded independent-model grid search")
     commands.add_parser("predict", help="Generate current rankings and next-game forecasts")
     commands.add_parser("go", help="Build features, train, predict using installed dependencies")
     commands.add_parser("edge-audit", help="Exploratory ATS residual correlations, not validated betting signals")
@@ -89,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "build-features":
         _json_print(build_features(settings))
     elif args.command == "train":
-        _json_print(train_models(settings))
+        _json_print(train_models(settings, tune=args.tune))
     elif args.command == "predict":
         _json_print(generate_predictions(settings))
     elif args.command == "go":

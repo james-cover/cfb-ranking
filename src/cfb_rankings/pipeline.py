@@ -92,6 +92,20 @@ def build_features(settings: Settings) -> dict[str, int]:
         raw["team_game_stats"],
         raw["advanced_game_stats"],
     )
+    stat_audit = pd.DataFrame(game_features.attrs.pop("full_stat_audit", []))
+    atomic_write_csv(stat_audit, settings.processed_dir / "stat_expectation_audit.csv")
+    if not stat_audit.empty:
+        from .full_stats import METRICS
+
+        coverage = stat_audit.groupby(["season", "stat"]).agg(
+            team_game_observations=("actual", "count"), actual_std=("actual", "std"),
+            residual_mean=("residual", "mean"), residual_std=("residual", "std"),
+        ).reindex(pd.MultiIndex.from_product(
+            [sorted(stat_audit.season.unique()), list(METRICS)], names=["season", "stat"]
+        )).reset_index()
+        coverage["team_game_observations"] = coverage.team_game_observations.fillna(0).astype(int)
+        coverage["available"] = coverage.team_game_observations.gt(0)
+        atomic_write_csv(coverage, settings.processed_dir / "full_stat_coverage.csv")
     simple_columns = [
         "rushing_ypg_diff", "passing_ypg_diff", "possession_time_pg_diff",
         "opp_adj_rushing_off_diff", "opp_adj_passing_off_diff",
@@ -104,7 +118,7 @@ def build_features(settings: Settings) -> dict[str, int]:
     if unusable:
         raise ValueError(
             "Box scores were downloaded but did not join to games; these model features "
-            f"are constant: {', '.join(unusable)}. Re-run cfb build-features with v0.9.0."
+            f"are constant: {', '.join(unusable)}. Check the raw box-score joins before training."
         )
     ap_training = build_ap_training_frame(
         team_week_features, raw["rankings"], raw["teams"]
@@ -123,10 +137,10 @@ def build_features(settings: Settings) -> dict[str, int]:
     }
 
 
-def train_models(settings: Settings) -> dict[str, object]:
+def train_models(settings: Settings, *, tune: bool = False) -> dict[str, object]:
     ap_training = read_csv(settings.processed_dir / "ap_training_data.csv")
     game_training = read_csv(settings.processed_dir / "game_training_data.csv")
-    if "feature_schema_version" not in game_training or not game_training["feature_schema_version"].eq(9).all():
+    if "feature_schema_version" not in game_training or not game_training["feature_schema_version"].eq(10).all():
         raise ValueError("Pregame features are outdated. Run cfb build-features before cfb train.")
     # Join consensus market lines onto the training data so the validation loop
     # can compute ATS accuracy alongside standard margin metrics.
@@ -144,6 +158,7 @@ def train_models(settings: Settings) -> dict[str, object]:
         game_training,
         settings.models_dir,
         validation_cutoff_season=settings.season,
+        tune=tune,
     )
     # Train the edge model (market-aware, predicts cover residual).
     _edge_bundle, edge_output = train_edge_model(
@@ -161,6 +176,8 @@ def train_models(settings: Settings) -> dict[str, object]:
         "game_winner_accuracy": float(selected_row["winner_accuracy"]),
         "independent_model": game_bundle.model_family,
         "independent_feature_set": game_bundle.selected_parameters.get("feature_set"),
+        "independent_hyperparameters": game_bundle.selected_parameters.get("hyperparameters"),
+        "evaluation_scope": "development_benchmark_not_untouched_test",
         "independent_features": game_bundle.features,
         "raw_model_ats": ats_output,
         "edge_model": edge_output,
@@ -207,7 +224,7 @@ def generate_predictions(settings: Settings) -> dict[str, int]:
     team_week = read_csv(settings.processed_dir / "team_week_features.csv")
     if team_week.empty:
         raise FileNotFoundError("Processed features are missing; run build-features first")
-    if "feature_schema_version" not in team_week or not team_week["feature_schema_version"].eq(9).all():
+    if "feature_schema_version" not in team_week or not team_week["feature_schema_version"].eq(10).all():
         raise ValueError("Team features are outdated. Run cfb build-features, then cfb train.")
     ap_bundle = load_ap_model(settings.models_dir)
     game_bundle = load_game_model(settings.models_dir)

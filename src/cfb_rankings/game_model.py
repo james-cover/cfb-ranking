@@ -10,9 +10,11 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.impute import SimpleImputer
+from threadpoolctl import threadpool_limits
 from xgboost import DMatrix, XGBRegressor
 
 from .features import MATCHUP_FEATURES, model_adjusted_snapshot
+from .full_stats import FULL_FEATURES
 
 
 @dataclass
@@ -27,7 +29,7 @@ class GameModelBundle:
     residual_q90: float
     selected_parameters: dict[str, Any]
     probability_calibration: tuple[float, float] = (0.0, 0.0)
-    schema_version: int = 9
+    schema_version: int = 10
     scaler: Any | None = None
     model_family: str = "xgboost"
 
@@ -35,12 +37,15 @@ class GameModelBundle:
         matrix = self.imputer.transform(frame.reindex(columns=self.features))
         return self.scaler.transform(matrix) if self.scaler is not None else matrix
 
+    @threadpool_limits.wrap(limits=1)
     def predict_margin(self, frame: pd.DataFrame) -> np.ndarray:
         return np.asarray(self.margin_model.predict(self._matrix(frame)), dtype=float)
 
+    @threadpool_limits.wrap(limits=1)
     def predict_total(self, frame: pd.DataFrame) -> np.ndarray:
         return np.asarray(self.total_model.predict(self._matrix(frame)), dtype=float)
 
+    @threadpool_limits.wrap(limits=1)
     def predict_margin_contributions(self, frame: pd.DataFrame) -> np.ndarray:
         """Return feature contributions followed by the model intercept/bias."""
         matrix = self._matrix(frame)
@@ -48,6 +53,18 @@ class GameModelBundle:
             contributions = matrix * np.asarray(self.margin_model.coef_, dtype=float)
             bias = np.full((len(matrix), 1), float(self.margin_model.intercept_))
             return np.hstack([contributions, bias])
+        if self.model_family == "hist_gradient_boosting":
+            # Order-dependent additive path decomposition, explicitly NOT SHAP.
+            baseline = np.zeros_like(matrix)
+            last = self.margin_model.predict(baseline)
+            bias = last.copy()
+            values = []
+            for index in range(matrix.shape[1]):
+                baseline[:, index] = matrix[:, index]
+                current = self.margin_model.predict(baseline)
+                values.append(current - last)
+                last = current
+            return np.column_stack([*values, bias])
         return np.asarray(
             self.margin_model.get_booster().predict(DMatrix(matrix), pred_contribs=True),
             dtype=float,
@@ -70,6 +87,7 @@ def select_and_train_game_model(
     validation_seasons: int = 4,
     validation_cutoff_season: int | None = None,
     random_state: int = 42,
+    tune: bool = False,
 ) -> tuple[GameModelBundle, pd.DataFrame]:
     from .bayesian_training import select_and_train_bayesian_model as train
 
@@ -78,6 +96,7 @@ def select_and_train_game_model(
         validation_seasons=validation_seasons,
         validation_cutoff_season=validation_cutoff_season,
         random_state=random_state,
+        tune=tune,
     )
 
 
@@ -86,8 +105,8 @@ def load_game_model(models_dir: Path) -> GameModelBundle:
     if not path.exists():
         raise FileNotFoundError("Opponent-adjusted independent model has not been trained yet")
     bundle = joblib.load(path)
-    if bundle.__dict__.get("schema_version") != 9:
-        raise ValueError("Independent model is not expectation-based v0.9. Run cfb build-features and cfb train.")
+    if bundle.__dict__.get("schema_version") != 10:
+        raise ValueError("Independent model is outdated. Run cfb build-features and cfb train.")
     return bundle
 
 
@@ -156,6 +175,7 @@ CONTRIBUTION_GROUPS["power_contribution"].update({
         "passing_off", "passing_def",
     )
 })
+CONTRIBUTION_GROUPS["efficiency_contribution"].update(FULL_FEATURES)
 
 
 def build_independent_rankings(
@@ -213,6 +233,9 @@ def build_independent_rankings(
         rows.append(
             {
                 "team": team,
+                "contribution_method": ("linear_standardized" if bundle.model_family == "bayesian_ridge"
+                                        else "ordered_path_not_shap" if bundle.model_family == "hist_gradient_boosting"
+                                        else "tree_shap"),
                 "model_rating": margin_sums[team] / max(comparisons[team], 1),
                 "wins": int(state.get("wins", 0)),
                 "losses": int(state.get("losses", 0)),

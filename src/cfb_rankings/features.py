@@ -9,6 +9,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .full_stats import FULL_TEAM_FEATURES, FullStatProfiles, observations
+
 AP_PATTERN = re.compile(r"associated press|ap top|\bap\b", re.IGNORECASE)
 EARLY_SEASON_PRIOR_GAMES = 4.0
 MODEL_FEATURE_BASELINES = {
@@ -215,6 +217,7 @@ class TeamState:
     team: str
     elo: float = 1500.0
     prior_metrics: dict[str, float] = field(default_factory=dict)
+    full_stats: dict[str, float] = field(default_factory=dict)
     games: int = 0
     wins: int = 0
     losses: int = 0
@@ -283,6 +286,7 @@ class TeamState:
         advanced_games = max(self.advanced_games, 1)
         box_games = max(self.box_games, 1)
         return {
+            **self.full_stats,
             "team": self.team,
             "stat_games": self.stat_games,
             "advanced_games": self.advanced_games,
@@ -480,6 +484,9 @@ MATCHUP_FEATURES = [
     "home_field",
     "season_progress",
 ]
+
+TEAM_NUMERIC_FEATURES.extend(FULL_TEAM_FEATURES)
+MATCHUP_FEATURES.extend(f"{name}_diff" for name in FULL_TEAM_FEATURES)
 
 AP_FEATURES = [
     "previous_ap_rank_filled",
@@ -727,6 +734,8 @@ def build_sequential_features(
         "points": {}, "rushing": {}, "passing": {},
     }
 
+    previous_full = {}
+    full_audit = []
     for season, season_games in work.groupby("season", sort=True):
         known_teams: set[str] = set()
         season_fbs = fbs_team_names(games, teams, int(season))
@@ -765,6 +774,9 @@ def build_sequential_features(
                     previous_expectations[metric].get(team) if team in season_fbs else None,
                 )
         _sync_expectation_ratings(states, expectation_models, known_teams)
+        full_profiles = FullStatProfiles(known_teams, previous_full)
+        for team in known_teams:
+            states[team].full_stats = full_profiles.snapshot(team)
 
         group_columns = ["season_type_order", "season_type", "week"]
         for (_, season_type, week), week_games in season_games.groupby(group_columns, sort=True):
@@ -799,6 +811,20 @@ def build_sequential_features(
                 home_stats = stats_lookup.get((game.game_id, str(game.home_team)), {})
                 away_stats = stats_lookup.get((game.game_id, str(game.away_team)), {})
                 box_score_available = bool(home_stats and away_stats)
+                h_observed = observations(home_stats, advanced_lookup.get((game.game_id, str(game.home_team)), {}),
+                                          float(game.home_points), float(game.away_points), away_stats)
+                a_observed = observations(away_stats, advanced_lookup.get((game.game_id, str(game.away_team)), {}),
+                                          float(game.away_points), float(game.home_points), home_stats)
+                # A defensive advanced value is the opponent's offensive value.
+                # Use it only as a missing-side fallback, never as a second game.
+                for metric, source in (("ppa", "defense_ppa"), ("success_rate", "defense_success_rate")):
+                    if h_observed[metric] is None:
+                        h_observed[metric] = advanced_lookup.get((game.game_id, str(game.away_team)), {}).get(source)
+                    if a_observed[metric] is None:
+                        a_observed[metric] = advanced_lookup.get((game.game_id, str(game.home_team)), {}).get(source)
+                context = {"game_id": game.game_id, "season": season, "season_type": season_type, "week": int(week)}
+                full_profiles.record(str(game.home_team), str(game.away_team), h_observed, **context)
+                full_profiles.record(str(game.away_team), str(game.home_team), a_observed, **context)
                 game_rows.append(
                     {
                         "game_id": game.game_id,
@@ -1050,6 +1076,9 @@ def build_sequential_features(
                     "last_week_ranked_opponent": int(bool(home_rank and home_rank <= 25)),
                 }
 
+            full_profiles.finish_week()
+            for team in known_teams:
+                states[team].full_stats = full_profiles.snapshot(team)
             # Revalue each résumé using opponents' strength as it exists this week.
             for state in states.values():
                 opponent_elos = [
@@ -1103,13 +1132,16 @@ def build_sequential_features(
             metric: model.profiles(season_fbs)
             for metric, model in expectation_models.items()
         }
+        previous_full = full_profiles.profiles(season_fbs)
+        full_audit.extend(full_profiles.audit)
 
     game_features = pd.DataFrame(game_rows)
     if not game_features.empty:
         game_features = game_features[game_features["model_eligible"]].reset_index(drop=True)
     team_week_features = pd.DataFrame(weekly_rows)
-    game_features["feature_schema_version"] = 9
-    team_week_features["feature_schema_version"] = 9
+    game_features["feature_schema_version"] = 10
+    team_week_features["feature_schema_version"] = 10
+    game_features.attrs["full_stat_audit"] = full_audit
     return game_features, team_week_features
 
 
